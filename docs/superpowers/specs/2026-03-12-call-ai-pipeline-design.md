@@ -115,34 +115,43 @@ call-ai-pipeline/
 
 ### 1. Novofon Webhook (`app/novofon/webhook.py`)
 
-- Accepts POST from Novofon: `NOTIFY_END` and `NOTIFY_RECORD` events
-- Extracts: `call_id`, `caller_number`, `called_number`, `duration`, `direction`
+- Accepts POST from Novofon
+- **Event handling strategy:** enqueue task only on `NOTIFY_RECORD` event (recording is ready). Ignore `NOTIFY_END` — it arrives before recording is available. Idempotency by `call_id` protects against duplicate webhooks.
+- Extracts: `call_id`, `caller_number`, `called_number`, `duration`, `direction`, `recording_url` (if present in payload)
 - Filters: skip calls shorter than `MIN_CALL_DURATION` (default 15s)
 - Webhook security: validate signature if supported by Novofon; fallback — secret token in URL path (`/webhook/{secret_token}`)
 - Returns `CallData` to arq queue
 
 ### 2. Novofon API (`app/novofon/api.py`)
 
-- Downloads mp3 recording by `call_id` via httpx
-- GET `/v1/pbx/record/request/` with `call_id` and `lifetime`
-- Retry: 5 attempts with exponential backoff (5, 10, 20, 40, 60s) — recording may not be ready immediately
-- Saves to `/tmp/call-pipeline/{call_id}.mp3`
+- Downloads mp3 recording via httpx
+- **Primary:** use `recording_url` from `NOTIFY_RECORD` webhook payload (direct link)
+- **Fallback:** if URL missing, request via `GET /v1/pbx/record/request/` with `call_id` and `lifetime`
+- Retry: 3 attempts with backoff (5, 10, 20s) — since we trigger on `NOTIFY_RECORD`, recording should be ready
+- Saves to docker volume `/data/tmp/{call_id}.mp3` (not /tmp — avoids tmpfs RAM issues)
 
 ### 3. SpeechKit STT (`app/stt/speechkit.py`)
 
 - Uses `yandexcloud` SDK for async recognition
+- **Audio upload flow:**
+  1. Upload mp3 to Yandex Object Storage (S3-compatible) bucket `call-ai-pipeline-audio`
+  2. Pass `s3://call-ai-pipeline-audio/{call_id}.mp3` URI to recognition request
+  3. After transcription completes — delete file from Object Storage
+  4. Requires: `YANDEX_S3_BUCKET`, `YANDEX_S3_ACCESS_KEY`, `YANDEX_S3_SECRET_KEY` in config
 - Config: `ru-RU`, `general:rc` model, MP3, 8000Hz, mono
 - `literature_text=True` (text normalization), `profanity_filter=False`
 - IAM token: managed by SDK automatically (service account)
 - Polling: every 3s, timeout 5 min
 - Returns: `list[{speaker: int, text: str, start_time: float}]`
 - If diarization unavailable — returns single text block
+- **Empty transcription handling:** if result is empty or contains only silence markers — skip LLM stage, log as `empty_transcription`, do not update lead
 
 ### 4. LLM Client (`app/llm/proxyapi_client.py`)
 
 - OpenAI SDK with `base_url="https://api.proxyapi.ru/openai/v1"`
 - Model: configurable via `LLM_MODEL` env var (default `gpt-4o-mini`)
 - `temperature=0.1`, `max_tokens=1000` (REQUIRED for ProxyAPI — otherwise reserves full context cost)
+- `response_format={"type": "json_object"}` — forces structured JSON output, reduces parse errors
 - Parses JSON response → validates via `LLMResponse` Pydantic model
 - On invalid JSON: 1 retry with same prompt
 - On second failure: fallback with `summary="Ошибка анализа"`
@@ -151,6 +160,7 @@ call-ai-pipeline/
 
 - `SYSTEM_PROMPT`: role, rules, output format
 - `USER_PROMPT_TEMPLATE`: transcript + metadata → expected JSON schema
+- `PROMPT_VERSION = "1.0"` — logged with each LLM call for traceability
 - `build_user_prompt(transcript, caller_number, duration) -> str`
 
 ### 6. Bitrix24 CRM (`app/crm/bitrix24.py`)
@@ -158,21 +168,23 @@ call-ai-pipeline/
 - httpx client with incoming webhook auth (`https://{domain}.bitrix24.ru/rest/{user_id}/{token}/`)
 - Rate limiting: ≤2 requests/second (B24 cloud limit)
 - Key methods:
-  - `find_lead_by_phone(phone)` — search via `crm.lead.list` with phone filter. Returns last open lead (STATUS_ID != CONVERTED, != JUNK). Retry after 10s if not found (lead may not have been created yet by native integration).
+  - `find_lead_by_phone(phone)` — search via `crm.lead.list` with phone filter. Returns last open lead (STATUS_ID != CONVERTED, != JUNK). If not found — retry 3 times with 10s delay (lead may not have been created yet by native integration). After 3 retries — fallback to `create_lead()`.
   - `create_lead(data)` — fallback only. Returns `lead_id`.
   - `update_lead(lead_id, data)` — enrich with AI analysis results.
   - `add_timeline_comment(entity_type, entity_id, comment)` — add AI summary to lead timeline.
 
 ### 7. Pipeline (`app/pipeline.py`)
 
-- Orchestrator: download → transcribe → analyze → find/update lead → cleanup
+- Orchestrator: download → S3 upload → transcribe → S3 cleanup → analyze → find/update lead → local cleanup
 - Each stage wrapped with retry logic and `call_id` context logging
 - Stage duration metrics logged (`duration_ms` per stage)
-- mp3 cleanup in `finally` block (even on error)
+- **SKIP_SPAM_LEADS logic:** if `qualification == "spam"` and `SKIP_SPAM_LEADS=true` — skip B24 update entirely, just log and mark as processed
+- **Empty transcription:** if STT returns empty text — skip LLM and B24 stages, log `empty_transcription`
+- mp3 cleanup in `finally` block (even on error); S3 object cleanup after transcription
 
 ### 8. Worker (`app/worker.py`)
 
-- arq WorkerSettings with `max_tries=3`, `retry_delay=60`
+- arq WorkerSettings with `max_tries=2`, `retry_delay=120`, `max_jobs=3` (limit concurrency to avoid rate limits on ProxyAPI/B24)
 - Graceful shutdown: `health_check_interval` + `stop_timeout` in docker-compose
 - DLQ: tasks that exhaust all retries go to `failed_calls` Redis list
 - Alert: on DLQ entry, POST to `ALERT_WEBHOOK_URL` (configurable)
@@ -213,22 +225,33 @@ class LeadData(BaseModel):
 
 ### Idempotency
 
-Before processing, check `call_id` in Redis SET (`processed_calls`). If exists — skip. TTL: 7 days.
+Before processing, check Redis key `processed:{call_id}`. If exists — skip. Each key has TTL 7 days (individual keys, not a single SET — avoids unbounded memory growth).
 
-### Retry Strategy
+### Retry Strategy (two levels)
+
+**Level 1: Per-stage retry (inside pipeline).** Handles transient errors (network, 429, 503):
 
 | Stage | Retries | Backoff | On exhaustion |
 |-------|---------|---------|---------------|
-| Download mp3 | 5 | 5, 10, 20, 40, 60s | Task `failed`, log `call_id` |
-| SpeechKit | 3 | 10, 20, 40s | Save `call_id` for manual processing |
-| LLM (ProxyAPI) | 2 | 5, 10s | Create lead with "requires manual analysis" |
-| Bitrix24 | 3 | 5, 10, 20s | Save result to local JSON file |
+| Download mp3 | 3 | 5, 10, 20s | Raise `DownloadError` (terminal) |
+| S3 upload | 2 | 5, 10s | Raise `UploadError` (terminal) |
+| SpeechKit | 3 | 10, 20, 40s | Raise `TranscriptionError` (terminal) |
+| LLM (ProxyAPI) | 2 | 5, 10s | Fallback: create lead with "requires manual analysis" (non-terminal) |
+| Bitrix24 | 3 | 5, 10, 20s | Save result to local JSON file (non-terminal) |
+
+**Level 2: arq job retry.** If pipeline raises a terminal error, arq retries the entire job (`max_tries=2`, delay 120s). This covers cases where stage-level retry exhausted but the issue was temporary (e.g., Novofon outage resolved after 2 min).
+
+**Total worst case:** stage retries × arq retries. E.g., download: 3 × 2 = 6 attempts.
+
+**Terminal vs non-terminal errors:**
+- Terminal (retryable by arq): `DownloadError`, `UploadError`, `TranscriptionError`
+- Non-terminal (handled within pipeline, no arq retry): LLM fallback, B24 save-to-JSON
 
 ### Dead Letter Queue (DLQ)
 
 Tasks that exhaust all arq retries land in `failed_calls` Redis list. Contains: `call_id`, failure reason, timestamp, last error.
 
-Admin endpoints:
+Admin endpoints (protected by `ADMIN_TOKEN` bearer auth):
 - `GET /admin/failed` — list failed tasks
 - `POST /admin/retry/{call_id}` — manual retry
 
@@ -276,6 +299,10 @@ NOVOFON_API_SECRET=
 # Yandex Cloud
 YANDEX_CLOUD_FOLDER_ID=
 YANDEX_CLOUD_SA_KEY_FILE=service_account_key.json
+YANDEX_S3_BUCKET=call-ai-pipeline-audio
+YANDEX_S3_ACCESS_KEY=
+YANDEX_S3_SECRET_KEY=
+YANDEX_S3_ENDPOINT=https://storage.yandexcloud.net
 
 # ProxyAPI (LLM)
 PROXYAPI_KEY=
@@ -293,6 +320,7 @@ MIN_CALL_DURATION=15
 SKIP_SPAM_LEADS=false
 WEBHOOK_SECRET=
 ALERT_WEBHOOK_URL=
+ADMIN_TOKEN=
 LOG_LEVEL=INFO
 ```
 
@@ -333,6 +361,7 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 yandexcloud>=0.300.0
+boto3>=1.34.0            # Yandex Object Storage (S3-compatible) upload
 structlog>=24.1.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
