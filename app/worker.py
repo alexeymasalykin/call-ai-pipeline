@@ -61,6 +61,9 @@ async def handle_call(ctx: dict, call_data_raw: dict) -> None:
         log.info("call_already_processed")
         return
 
+    job_try = ctx.get("job_try", 1)
+    max_tries = 2
+
     try:
         await process_call(
             call_data,
@@ -73,8 +76,15 @@ async def handle_call(ctx: dict, call_data_raw: dict) -> None:
         )
         await _mark_processed(redis, call_data.call_id)
         log.info("call_processed")
-    except TerminalError:
-        raise  # Let arq retry
+    except TerminalError as exc:
+        if job_try >= max_tries:
+            # All arq retries exhausted — send to DLQ
+            await _add_to_dlq(
+                redis, call_data.call_id, str(exc),
+                settings.ALERT_WEBHOOK_URL, call_data_raw,
+            )
+        else:
+            raise  # Let arq retry
     except Exception as exc:
         await _add_to_dlq(
             redis, call_data.call_id, str(exc),
