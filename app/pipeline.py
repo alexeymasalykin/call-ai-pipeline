@@ -27,8 +27,8 @@ async def process_call(
 ) -> None:
     """Main pipeline: download → S3 → STT → LLM → CRM (best-effort).
 
-    Raises RetryableError on transient failures (download, S3, STT).
-    EmptyTranscriptionError is handled internally (early return).
+    Raises RetryableError on transient failures (download, S3 upload, STT transcription).
+    EmptyTranscriptionError (not retryable) is handled internally with early return.
     LLMAnalysisError is terminal (worker sends to DLQ).
     CRM failures are saved to /data/failed_crm/, not sent to DLQ.
     """
@@ -84,7 +84,12 @@ async def process_call(
             lead = await bitrix.find_lead_by_phone(call_data.caller_number)
 
             if lead:
-                lead_id = int(lead["ID"])
+                try:
+                    lead_id = int(lead["ID"])
+                except (KeyError, ValueError, TypeError) as exc:
+                    raise Bitrix24APIError(
+                        f"Invalid lead response: {exc}"
+                    ) from exc
                 await bitrix.update_lead(lead_id, {
                     "TITLE": title,
                     "COMMENTS": analysis.summary,

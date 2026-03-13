@@ -124,3 +124,63 @@ class TestAdminEndpoints:
             headers={"Authorization": "Bearer test-admin"},
         )
         assert resp.status_code == 200
+
+    def test_admin_failed_with_corrupt_entry(self, client):
+        mock_redis = client.app.state.redis
+        mock_redis.lrange.return_value = [b"not-json", b'{"call_id": "ok"}']
+        resp = client.get(
+            "/admin/failed",
+            headers={"Authorization": "Bearer test-admin"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 2
+        assert data[0]["parse_error"] is True
+        assert data[1]["call_id"] == "ok"
+
+
+class TestAdminRetryEndpoint:
+    def test_retry_re_enqueues_call(self, client):
+        entry = json.dumps({
+            "call_id": "retry-1",
+            "error": "some error",
+            "call_data": {"call_id": "retry-1", "caller_number": "79001234567"},
+        })
+        mock_redis = client.app.state.redis
+        mock_redis.lrange.return_value = [entry.encode()]
+        resp = client.post(
+            "/admin/retry/retry-1",
+            headers={"Authorization": "Bearer test-admin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "re-enqueued"
+        mock_redis.lrem.assert_called_once()
+
+    def test_retry_removes_entry_without_call_data(self, client):
+        entry = json.dumps({"call_id": "retry-2", "error": "bad data"})
+        mock_redis = client.app.state.redis
+        mock_redis.lrange.return_value = [entry.encode()]
+        resp = client.post(
+            "/admin/retry/retry-2",
+            headers={"Authorization": "Bearer test-admin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "removed_from_dlq"
+
+    def test_retry_not_found_returns_404(self, client):
+        mock_redis = client.app.state.redis
+        mock_redis.lrange.return_value = []
+        resp = client.post(
+            "/admin/retry/missing",
+            headers={"Authorization": "Bearer test-admin"},
+        )
+        assert resp.status_code == 404
+
+    def test_retry_skips_corrupt_entries(self, client):
+        mock_redis = client.app.state.redis
+        mock_redis.lrange.return_value = [b"corrupt-json"]
+        resp = client.post(
+            "/admin/retry/some-id",
+            headers={"Authorization": "Bearer test-admin"},
+        )
+        assert resp.status_code == 404

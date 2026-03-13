@@ -2,7 +2,7 @@ import json
 
 import structlog
 from openai import AsyncOpenAI
-from pydantic import ValidationError as PydanticValidationError
+from pydantic import ValidationError
 
 from app.exceptions import LLMAnalysisError
 from app.llm.prompts import PROMPT_VERSION, SYSTEM_PROMPT, build_user_prompt
@@ -72,6 +72,6 @@ class ProxyAPIClient:
         except json.JSONDecodeError as exc:
             logger.warning("llm_json_decode_error", error=str(exc))
             return None
-        except PydanticValidationError as exc:
+        except ValidationError as exc:
             logger.warning("llm_validation_error", errors=exc.errors())
             return None

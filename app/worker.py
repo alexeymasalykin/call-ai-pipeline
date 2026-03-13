@@ -9,7 +9,7 @@ from redis.asyncio import Redis
 
 from app.config import Settings
 from app.crm.bitrix24 import Bitrix24Client
-from app.exceptions import RetryableError
+from app.exceptions import PipelineError, RetryableError
 from app.llm.proxyapi_client import ProxyAPIClient
 from app.models.schemas import CallData
 from app.novofon.api import NovofonAPI
@@ -19,7 +19,7 @@ from app.stt.speechkit import SpeechKitClient
 
 logger = structlog.get_logger()
 
-_IDEMPOTENCY_TTL = 604800  # 7 days — covers weekend + full retry window
+_IDEMPOTENCY_TTL = 604800  # 7 days — prevents duplicate processing if webhook resends
 
 
 async def _is_processed(redis: Redis, call_id: str) -> bool:
@@ -54,7 +54,9 @@ async def _add_to_dlq(
 async def handle_call(ctx: dict, call_data_raw: dict) -> None:
     """arq task handler: validates input, checks idempotency, delegates to process_call.
 
-    RetryableError → arq retry (up to max_tries), other errors → DLQ.
+    RetryableError → re-raised for arq retry unless max_tries exhausted (then DLQ).
+    Other PipelineError (LLMAnalysisError etc.) → DLQ immediately.
+    Unexpected Exception → DLQ + re-raise so arq records the failure.
     """
     settings: Settings = ctx["settings"]
     redis: Redis = ctx["redis"]
@@ -98,12 +100,22 @@ async def handle_call(ctx: dict, call_data_raw: dict) -> None:
             )
         else:
             raise
-    except Exception as exc:
-        logger.error("unexpected_error", call_id=call_data.call_id, error=repr(exc))
+    except PipelineError as exc:
+        logger.error("terminal_pipeline_error", call_id=call_data.call_id, error=repr(exc))
         await _add_to_dlq(
             redis, call_data.call_id, repr(exc),
             settings.ALERT_WEBHOOK_URL, call_data_raw,
         )
+    except Exception as exc:
+        logger.error(
+            "unexpected_error", call_id=call_data.call_id,
+            error=repr(exc), exc_info=True,
+        )
+        await _add_to_dlq(
+            redis, call_data.call_id, repr(exc),
+            settings.ALERT_WEBHOOK_URL, call_data_raw,
+        )
+        raise
 
 
 async def startup(ctx: dict) -> None:
@@ -136,10 +148,10 @@ async def startup(ctx: dict) -> None:
 
 
 async def shutdown(ctx: dict) -> None:
-    """Cleanup shared resources."""
-    for name in ("bitrix", "llm"):
+    """Cleanup shared resources: close all clients, then Redis."""
+    for name in ("bitrix", "llm", "novofon", "s3", "stt"):
         client = ctx.get(name)
-        if client:
+        if client and hasattr(client, "close"):
             try:
                 await client.close()
             except Exception as exc:
@@ -149,7 +161,7 @@ async def shutdown(ctx: dict) -> None:
         try:
             await redis.aclose()
         except Exception as exc:
-            logger.error("shutdown_redis_close_failed", error=repr(exc))
+            logger.error("shutdown_close_failed", client="redis", error=repr(exc))
     logger.info("worker_stopped")
 
 

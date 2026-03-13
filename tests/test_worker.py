@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.exceptions import RetryableError, DownloadError
-from app.worker import handle_call
+from app.exceptions import RetryableError, DownloadError, LLMAnalysisError
+from app.worker import handle_call, shutdown
 
 
 def _make_ctx(settings=None, redis=None, job_try=1):
@@ -82,11 +82,12 @@ class TestHandleCall:
     @pytest.mark.asyncio
     @patch("app.worker.process_call", new_callable=AsyncMock)
     @patch("app.worker._add_to_dlq", new_callable=AsyncMock)
-    async def test_non_retryable_error_sends_to_dlq_immediately(self, mock_dlq, mock_process):
+    async def test_non_retryable_error_sends_to_dlq_and_reraises(self, mock_dlq, mock_process):
         mock_process.side_effect = RuntimeError("unexpected")
         ctx = _make_ctx(job_try=1)
 
-        await handle_call(ctx, VALID_CALL_DATA)
+        with pytest.raises(RuntimeError):
+            await handle_call(ctx, VALID_CALL_DATA)
 
         mock_dlq.assert_called_once()
 
@@ -101,3 +102,59 @@ class TestHandleCall:
         mock_dlq.assert_called_once()
         assert "bad" in mock_dlq.call_args[0][1]
         assert "Invalid call data" in mock_dlq.call_args[0][2]
+
+    @pytest.mark.asyncio
+    @patch("app.worker.process_call", new_callable=AsyncMock)
+    @patch("app.worker._add_to_dlq", new_callable=AsyncMock)
+    async def test_pipeline_error_sends_to_dlq_no_reraise(self, mock_dlq, mock_process):
+        mock_process.side_effect = LLMAnalysisError("bad json")
+        ctx = _make_ctx(job_try=1)
+
+        await handle_call(ctx, VALID_CALL_DATA)
+
+        mock_dlq.assert_called_once()
+
+
+
+class TestShutdown:
+    @pytest.mark.asyncio
+    async def test_closes_all_clients(self):
+        ctx = {
+            "bitrix": AsyncMock(),
+            "llm": AsyncMock(),
+            "novofon": AsyncMock(),
+            "s3": AsyncMock(),
+            "stt": AsyncMock(),
+            "redis": AsyncMock(),
+        }
+        await shutdown(ctx)
+
+        for name in ("bitrix", "llm", "novofon", "s3", "stt"):
+            ctx[name].close.assert_called_once()
+        ctx["redis"].aclose.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_continues_on_client_close_error(self):
+        ctx = {
+            "bitrix": AsyncMock(),
+            "llm": AsyncMock(),
+            "novofon": AsyncMock(),
+            "s3": AsyncMock(),
+            "stt": AsyncMock(),
+            "redis": AsyncMock(),
+        }
+        ctx["bitrix"].close.side_effect = RuntimeError("close failed")
+
+        await shutdown(ctx)
+
+        # Other clients still closed despite bitrix failure
+        ctx["llm"].close.assert_called_once()
+        ctx["redis"].aclose.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handles_missing_clients(self):
+        ctx = {"redis": AsyncMock()}
+
+        await shutdown(ctx)
+
+        ctx["redis"].aclose.assert_called_once()

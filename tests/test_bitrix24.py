@@ -1,7 +1,7 @@
 import httpx
 import pytest
 import respx
-from app.crm.bitrix24 import Bitrix24Client
+from app.crm.bitrix24 import Bitrix24Client, _mask_phone
 from app.exceptions import Bitrix24APIError
 from app.models.schemas import LeadData
 
@@ -152,3 +152,17 @@ class TestCallRetryLogic:
         ]
         await client.update_lead(42, {"TITLE": "Test"})
         assert route.call_count == 2
+
+
+class TestMaskPhone:
+    def test_long_phone_masked(self):
+        assert _mask_phone("79001234567") == "79001****"
+
+    def test_exactly_six_chars_masked(self):
+        assert _mask_phone("790012") == "79001****"
+
+    def test_short_phone_fully_masked(self):
+        assert _mask_phone("7900") == "****"
+
+    def test_empty_phone_fully_masked(self):
+        assert _mask_phone("") == "****"

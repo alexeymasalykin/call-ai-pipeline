@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.exceptions import LLMAnalysisError
 from app.llm.proxyapi_client import ProxyAPIClient
 from app.models.schemas import LLMResponse
 
@@ -80,8 +81,6 @@ class TestProxyAPIClient:
 
     @pytest.mark.asyncio
     async def test_analyze_call_double_failure_raises_error(self, client):
-        from app.exceptions import LLMAnalysisError
-
         with patch.object(
             client._client.chat.completions,
             "create",

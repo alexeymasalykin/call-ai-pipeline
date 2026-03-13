@@ -94,6 +94,26 @@ class TestLLMResponse:
         assert data.company is None
         assert data.tags == []
 
+    def test_empty_strings_become_none(self):
+        data = LLMResponse(
+            summary="Тест.", qualification="cold", sentiment="neutral",
+            client_name="", company="  ", request="\t",
+            budget_mentioned="  \n  ", next_action="",
+        )
+        assert data.client_name is None
+        assert data.company is None
+        assert data.request is None
+        assert data.budget_mentioned is None
+        assert data.next_action is None
+
+    def test_non_empty_strings_preserved(self):
+        data = LLMResponse(
+            summary="Тест.", qualification="cold", sentiment="neutral",
+            client_name="Иван", company="ООО Ромашка",
+        )
+        assert data.client_name == "Иван"
+        assert data.company == "ООО Ромашка"
+
     def test_invalid_qualification_rejected(self):
         with pytest.raises(ValueError):
             LLMResponse(summary="test", qualification="medium", sentiment="neutral")

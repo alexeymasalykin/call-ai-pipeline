@@ -4,10 +4,10 @@ from contextlib import asynccontextmanager
 
 import structlog
 from arq.connections import create_pool, RedisSettings
-from redis.exceptions import RedisError
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import ValidationError
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.config import Settings
 from app.novofon.webhook import WebhookIgnored, parse_webhook
@@ -81,8 +81,8 @@ def create_app() -> FastAPI:
         for item in items:
             try:
                 result.append(json.loads(item))
-            except (json.JSONDecodeError, ValueError):
-                result.append({"raw": item.decode() if isinstance(item, bytes) else str(item)})
+            except json.JSONDecodeError:
+                result.append({"raw": item.decode() if isinstance(item, bytes) else str(item), "parse_error": True})
         return result
 
     @app.post("/admin/retry/{call_id}", dependencies=[Depends(_verify_admin)])
@@ -91,10 +91,12 @@ def create_app() -> FastAPI:
         for item in items:
             try:
                 data = json.loads(item)
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError:
+                logger.warning("dlq_corrupt_entry", raw=item[:200])
                 continue
             if data.get("call_id") == call_id:
                 has_call_data = "call_data" in data
+                await app.state.redis.lrem("failed_calls", 1, item)
                 if has_call_data:
                     try:
                         await app.state.arq.enqueue_job(
@@ -103,7 +105,6 @@ def create_app() -> FastAPI:
                     except Exception as exc:
                         logger.error("retry_enqueue_failed", call_id=call_id, error=repr(exc))
                         raise HTTPException(503, detail="Failed to re-enqueue call")
-                await app.state.redis.lrem("failed_calls", 1, item)
                 status = "re-enqueued" if has_call_data else "removed_from_dlq"
                 return {"status": status, "call_id": call_id}
         raise HTTPException(404, detail=f"Call {call_id} not found in DLQ")
