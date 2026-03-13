@@ -79,7 +79,9 @@ class TestProxyAPIClient:
             assert result.summary == "Тест."
 
     @pytest.mark.asyncio
-    async def test_analyze_call_double_failure_returns_fallback(self, client):
+    async def test_analyze_call_double_failure_raises_error(self, client):
+        from app.exceptions import LLMAnalysisError
+
         with patch.object(
             client._client.chat.completions,
             "create",
@@ -89,8 +91,28 @@ class TestProxyAPIClient:
                 _make_completion("still bad json"),
             ],
         ):
-            result = await client.analyze_call(
-                transcript="тест", caller_number="79001234567", duration=30
-            )
-            assert result.summary == "Ошибка анализа"
-            assert result.qualification == "cold"
+            with pytest.raises(LLMAnalysisError, match="invalid JSON after 2 attempts"):
+                await client.analyze_call(
+                    transcript="тест", caller_number="79001234567", duration=30
+                )
+
+    @pytest.mark.asyncio
+    async def test_analyze_call_empty_content_raises_error(self, client):
+        from app.exceptions import LLMAnalysisError
+
+        choice = MagicMock()
+        choice.message.content = None
+        choice.finish_reason = "content_filter"
+        response = MagicMock()
+        response.choices = [choice]
+
+        with patch.object(
+            client._client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+            return_value=response,
+        ):
+            with pytest.raises(LLMAnalysisError, match="empty content"):
+                await client.analyze_call(
+                    transcript="тест", caller_number="79001234567", duration=30
+                )

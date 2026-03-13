@@ -1,11 +1,13 @@
+import json
 import time
+from pathlib import Path
 
 import structlog
 
 from app.crm.bitrix24 import Bitrix24Client
-from app.exceptions import EmptyTranscriptionError
-from app.llm.proxyapi_client import ProxyAPIClient
-from app.models.schemas import CallData, LeadData, LLMResponse
+from app.exceptions import Bitrix24APIError, EmptyTranscriptionError
+from app.llm.base import LLMClient
+from app.models.schemas import CallData, LeadData, LLMResponse, Qualification
 from app.novofon.api import NovofonAPI
 from app.stt.s3 import S3Client
 from app.stt.speechkit import SpeechKitClient
@@ -19,11 +21,17 @@ async def process_call(
     novofon: NovofonAPI,
     s3: S3Client,
     stt: SpeechKitClient,
-    llm: ProxyAPIClient,
+    llm: LLMClient,
     bitrix: Bitrix24Client,
     skip_spam: bool = False,
 ) -> None:
-    """Main pipeline: download → S3 → STT → LLM → CRM."""
+    """Main pipeline: download → S3 → STT → LLM → CRM (best-effort).
+
+    Raises RetryableError on transient failures (download, S3, STT).
+    EmptyTranscriptionError is handled internally (early return).
+    LLMAnalysisError is terminal (worker sends to DLQ).
+    CRM failures are saved to /data/failed_crm/, not sent to DLQ.
+    """
     log = logger.bind(call_id=call_data.call_id)
     mp3_path = None
     s3_key = f"{call_data.call_id}.mp3"
@@ -64,26 +72,26 @@ async def process_call(
         log.info("stage_complete", stage="llm", duration_ms=_elapsed(start))
 
         # 5. Skip spam if configured
-        if analysis.qualification == "spam" and skip_spam:
+        if analysis.qualification == Qualification.SPAM and skip_spam:
             log.info("spam_skipped")
             return
 
-        # 6. Find/create lead in Bitrix24 (non-terminal: save to JSON on failure)
+        # 6. Find/create lead in Bitrix24 (best-effort: failures saved to /data/failed_crm/)
         start = time.monotonic()
+        title = f"Звонок: {analysis.summary[:50]}"
+        lead_id: int | None = None
         try:
             lead = await bitrix.find_lead_by_phone(call_data.caller_number)
 
             if lead:
-                await bitrix.update_lead(lead["ID"], {
-                    "TITLE": f"Звонок: {analysis.summary[:50]}",
+                lead_id = int(lead["ID"])
+                await bitrix.update_lead(lead_id, {
+                    "TITLE": title,
                     "COMMENTS": analysis.summary,
                 })
-                await bitrix.add_timeline_comment(
-                    "lead", lead["ID"], _format_comment(analysis),
-                )
             else:
                 lead_data = LeadData(
-                    title=f"Звонок: {analysis.summary[:50]}",
+                    title=title,
                     client_name=analysis.client_name,
                     company=analysis.company,
                     phone=call_data.caller_number,
@@ -91,13 +99,16 @@ async def process_call(
                     qualification=analysis.qualification,
                 )
                 lead_id = await bitrix.create_lead(lead_data)
-                await bitrix.add_timeline_comment(
-                    "lead", lead_id, _format_comment(analysis),
-                )
+
+            if lead_id is None:
+                raise Bitrix24APIError("lead_id not set after find/create")
+            await bitrix.add_timeline_comment(
+                "lead", lead_id, _format_comment(analysis),
+            )
             log.info("stage_complete", stage="crm", duration_ms=_elapsed(start))
-        except Exception as exc:
+        except Bitrix24APIError as exc:
             log.error("crm_failed_saving_locally", error=str(exc))
-            _save_failed_crm_result(call_data, analysis)
+            _save_failed_crm_result(log, call_data, analysis)
 
     finally:
         if mp3_path and mp3_path.exists():
@@ -105,18 +116,27 @@ async def process_call(
             log.info("mp3_cleaned")
 
 
-def _save_failed_crm_result(call_data: CallData, analysis: LLMResponse) -> None:
+def _save_failed_crm_result(
+    log: structlog.stdlib.BoundLogger,
+    call_data: CallData,
+    analysis: LLMResponse,
+) -> None:
     """Save failed CRM update to local JSON for later processing."""
-    import json
-    from pathlib import Path
-
-    failed_dir = Path("/data/failed_crm")
-    failed_dir.mkdir(parents=True, exist_ok=True)
-    dest = failed_dir / f"{call_data.call_id}.json"
-    dest.write_text(json.dumps({
-        "call_data": call_data.model_dump(mode="json"),
-        "analysis": analysis.model_dump(mode="json"),
-    }, ensure_ascii=False, indent=2))
+    try:
+        failed_dir = Path("/data/failed_crm")
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        dest = failed_dir / f"{call_data.call_id}.json"
+        dest.write_text(json.dumps({
+            "call_data": call_data.model_dump(mode="json"),
+            "analysis": analysis.model_dump(mode="json"),
+        }, ensure_ascii=False, indent=2))
+    except Exception as save_exc:
+        log.error(
+            "crm_fallback_save_failed",
+            error=repr(save_exc),
+            call_id=call_data.call_id,
+            analysis=analysis.model_dump(mode="json"),
+        )
 
 
 def _format_comment(analysis: LLMResponse) -> str:

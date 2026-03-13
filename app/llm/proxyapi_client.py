@@ -2,24 +2,25 @@ import json
 
 import structlog
 from openai import AsyncOpenAI
+from pydantic import ValidationError as PydanticValidationError
 
+from app.exceptions import LLMAnalysisError
 from app.llm.prompts import PROMPT_VERSION, SYSTEM_PROMPT, build_user_prompt
 from app.models.schemas import LLMResponse
 
 logger = structlog.get_logger()
 
-_FALLBACK = LLMResponse(
-    summary="Ошибка анализа",
-    qualification="cold",
-    sentiment="neutral",
-    tags=[],
-)
+
+_MAX_PARSE_ATTEMPTS = 2
 
 
 class ProxyAPIClient:
     def __init__(self, api_key: str, base_url: str, model: str) -> None:
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._model = model
+
+    async def close(self) -> None:
+        await self._client.close()
 
     async def analyze_call(
         self, transcript: str, caller_number: str, duration: int
@@ -29,7 +30,7 @@ class ProxyAPIClient:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        for attempt in range(2):
+        for attempt in range(_MAX_PARSE_ATTEMPTS):
             raw = await self._call_llm(messages)
             result = self._parse_response(raw)
             if result is not None:
@@ -40,8 +41,10 @@ class ProxyAPIClient:
                 prompt_version=PROMPT_VERSION,
                 raw_response=raw[:200],
             )
-        logger.error("llm_fallback", prompt_version=PROMPT_VERSION)
-        return _FALLBACK
+        raise LLMAnalysisError(
+            f"LLM returned invalid JSON after {_MAX_PARSE_ATTEMPTS} attempts "
+            f"(prompt_version={PROMPT_VERSION})"
+        )
 
     async def _call_llm(self, messages: list[dict]) -> str:
         response = await self._client.chat.completions.create(
@@ -51,12 +54,24 @@ class ProxyAPIClient:
             max_tokens=1000,
             response_format={"type": "json_object"},
         )
-        return response.choices[0].message.content or ""
+        if not response.choices:
+            raise LLMAnalysisError("LLM returned response with no choices")
+        choice = response.choices[0]
+        if not choice.message.content:
+            raise LLMAnalysisError(
+                f"LLM returned empty content "
+                f"(finish_reason={choice.finish_reason})"
+            )
+        return choice.message.content
 
     @staticmethod
     def _parse_response(raw: str) -> LLMResponse | None:
         try:
             data = json.loads(raw)
             return LLMResponse.model_validate(data)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError as exc:
+            logger.warning("llm_json_decode_error", error=str(exc))
+            return None
+        except PydanticValidationError as exc:
+            logger.warning("llm_validation_error", errors=exc.errors())
             return None

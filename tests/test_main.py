@@ -53,13 +53,23 @@ class TestWebhookEndpoint:
             "duration": "45",
             "call_start": "2026-03-12 10:00:00",
         }
-        resp = client.post("/webhook/test-secret", json=payload)
+        resp = client.post(
+            "/webhook", json=payload,
+            headers={"X-Webhook-Secret": "test-secret"},
+        )
         assert resp.status_code == 200
         assert resp.json()["status"] == "enqueued"
 
     def test_invalid_secret_returns_403(self, client):
-        resp = client.post("/webhook/wrong-secret", json={})
+        resp = client.post(
+            "/webhook", json={},
+            headers={"X-Webhook-Secret": "wrong-secret"},
+        )
         assert resp.status_code == 403
+
+    def test_missing_secret_returns_422(self, client):
+        resp = client.post("/webhook", json={})
+        assert resp.status_code == 422
 
     def test_short_call_ignored(self, client):
         payload = {
@@ -70,9 +80,23 @@ class TestWebhookEndpoint:
             "duration": "5",
             "call_start": "2026-03-12 10:00:00",
         }
-        resp = client.post("/webhook/test-secret", json=payload)
+        resp = client.post(
+            "/webhook", json=payload,
+            headers={"X-Webhook-Secret": "test-secret"},
+        )
         assert resp.status_code == 200
         assert resp.json()["status"] == "ignored"
+
+    def test_invalid_json_returns_400(self, client):
+        resp = client.post(
+            "/webhook",
+            content=b"not json",
+            headers={
+                "X-Webhook-Secret": "test-secret",
+                "Content-Type": "application/json",
+            },
+        )
+        assert resp.status_code == 400
 
 
 class TestHealthEndpoint:
@@ -85,7 +109,7 @@ class TestHealthEndpoint:
 class TestAdminEndpoints:
     def test_admin_without_token_returns_422(self, client):
         resp = client.get("/admin/failed")
-        assert resp.status_code == 422  # Missing header
+        assert resp.status_code == 422
 
     def test_admin_with_wrong_token_returns_401(self, client):
         resp = client.get(

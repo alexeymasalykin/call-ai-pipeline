@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.exceptions import DownloadError, EmptyTranscriptionError
+from app.exceptions import Bitrix24APIError, DownloadError, EmptyTranscriptionError
 from app.models.schemas import CallData, LLMResponse
 from app.pipeline import process_call
 from app.stt.speechkit import TranscriptSegment
@@ -38,8 +38,6 @@ def mock_deps():
 
     bitrix = AsyncMock()
     bitrix.find_lead_by_phone.return_value = {"ID": 42, "STATUS_ID": "NEW"}
-    bitrix.update_lead.return_value = True
-    bitrix.add_timeline_comment.return_value = True
 
     return {
         "novofon": novofon,
@@ -117,8 +115,16 @@ class TestProcessCall:
     @pytest.mark.asyncio
     @patch("app.pipeline._save_failed_crm_result")
     async def test_bitrix_failure_saves_to_json(self, mock_save, sample_call_data, mock_deps):
-        mock_deps["bitrix"].find_lead_by_phone.side_effect = Exception("B24 down")
+        mock_deps["bitrix"].find_lead_by_phone.side_effect = Bitrix24APIError("B24 down")
 
         await process_call(sample_call_data, **mock_deps)
 
         mock_save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_transcription_still_deletes_s3(self, sample_call_data, mock_deps):
+        mock_deps["stt"].transcribe.side_effect = EmptyTranscriptionError("empty")
+
+        await process_call(sample_call_data, **mock_deps)
+
+        mock_deps["s3"].delete.assert_called_once()

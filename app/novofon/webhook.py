@@ -1,5 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timezone
+
+import structlog
+
 from app.models.schemas import CallData
+
+logger = structlog.get_logger()
 
 
 class WebhookIgnored(Exception):
@@ -17,7 +22,12 @@ def parse_webhook(payload: dict, min_duration: int) -> CallData:
     try:
         timestamp = datetime.fromisoformat(call_start)
     except (ValueError, TypeError):
-        timestamp = datetime.now()
+        logger.warning(
+            "invalid_call_start",
+            call_start=call_start,
+            call_id=payload.get("call_id"),
+        )
+        timestamp = datetime.now(timezone.utc)
     return CallData(
         call_id=payload["call_id"],
         caller_number=payload["caller_id"],

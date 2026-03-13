@@ -22,3 +22,8 @@ class TestSegmentsToText:
         segments = [TranscriptSegment(speaker=0, text="Тест", start_time=0.0)]
         result = SpeechKitClient.segments_to_text(segments)
         assert result == "Спикер 0: Тест"
+
+    def test_negative_speaker_shows_unknown(self):
+        segments = [TranscriptSegment(speaker=-1, text="Привет", start_time=0.0)]
+        result = SpeechKitClient.segments_to_text(segments)
+        assert result == "Неизвестный: Привет"

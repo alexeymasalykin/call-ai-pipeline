@@ -1,42 +1,66 @@
 from datetime import datetime
-from typing import Literal, Optional
+from enum import StrEnum
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
-class CallData(BaseModel):
+class Qualification(StrEnum):
+    HOT = "hot"
+    WARM = "warm"
+    COLD = "cold"
+    SPAM = "spam"
+
+
+class Sentiment(StrEnum):
+    POSITIVE = "positive"
+    NEUTRAL = "neutral"
+    NEGATIVE = "negative"
+
+
+class CallData(BaseModel, frozen=True):
     """Incoming call data from Novofon webhook."""
 
-    call_id: str
-    caller_number: str
-    called_number: str
-    duration: int
+    call_id: str = Field(min_length=1)
+    caller_number: str = Field(min_length=1)
+    called_number: str = Field(min_length=1)
+    duration: int = Field(ge=0)
     direction: Literal["incoming", "outgoing"]
     timestamp: datetime
-    recording_url: Optional[str] = None
+    recording_url: str | None = None
 
 
-class LLMResponse(BaseModel):
+class LLMResponse(BaseModel, frozen=True):
     """Structured analysis from LLM."""
 
-    client_name: Optional[str] = None
-    company: Optional[str] = None
-    request: Optional[str] = None
-    budget_mentioned: Optional[str] = None
-    summary: str
-    qualification: Literal["hot", "warm", "cold", "spam"]
-    next_action: Optional[str] = None
-    sentiment: Literal["positive", "neutral", "negative"]
-    tags: list[str] = []
+    client_name: str | None = None
+    company: str | None = None
+    request: str | None = None
+    budget_mentioned: str | None = None
+    summary: str = Field(min_length=1)
+    qualification: Qualification
+    sentiment: Sentiment
+    next_action: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "client_name", "company", "request", "budget_mentioned", "next_action",
+        mode="before",
+    )
+    @classmethod
+    def empty_str_to_none(cls, v: str | None) -> str | None:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
 
-class LeadData(BaseModel):
+class LeadData(BaseModel, frozen=True):
     """Data for creating a lead in Bitrix24."""
 
-    title: str
-    client_name: Optional[str] = None
-    company: Optional[str] = None
-    phone: str
-    summary: str
-    qualification: str
+    title: str = Field(min_length=1)
+    client_name: str | None = None
+    company: str | None = None
+    phone: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    qualification: Qualification
     source: str = "CALL"

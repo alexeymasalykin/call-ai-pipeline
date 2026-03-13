@@ -4,11 +4,12 @@ from datetime import datetime, timezone
 import httpx
 import structlog
 from arq.connections import RedisSettings
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from app.config import Settings
 from app.crm.bitrix24 import Bitrix24Client
-from app.exceptions import TerminalError
+from app.exceptions import RetryableError
 from app.llm.proxyapi_client import ProxyAPIClient
 from app.models.schemas import CallData
 from app.novofon.api import NovofonAPI
@@ -18,7 +19,7 @@ from app.stt.speechkit import SpeechKitClient
 
 logger = structlog.get_logger()
 
-_IDEMPOTENCY_TTL = 604800  # 7 days
+_IDEMPOTENCY_TTL = 604800  # 7 days — covers weekend + full retry window
 
 
 async def _is_processed(redis: Redis, call_id: str) -> bool:
@@ -33,28 +34,41 @@ async def _add_to_dlq(
     redis: Redis, call_id: str, error: str, alert_url: str,
     call_data_raw: dict | None = None,
 ) -> None:
-    payload = json.dumps({
+    entry = {
         "call_id": call_id,
         "error": error,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "call_data": call_data_raw,
-    })
-    await redis.rpush("failed_calls", payload)
+    }
+    await redis.rpush("failed_calls", json.dumps(entry))
     logger.error("dlq_entry", call_id=call_id, error=error)
 
     if alert_url:
         try:
             async with httpx.AsyncClient() as client:
-                await client.post(alert_url, json=json.loads(payload), timeout=10)
-        except Exception as exc:
-            logger.warning("alert_failed", call_id=call_id, error=str(exc))
+                await client.post(alert_url, json=entry, timeout=10)
+        except httpx.HTTPError as exc:
+            logger.error("alert_failed", call_id=call_id, error=repr(exc))
 
 
 async def handle_call(ctx: dict, call_data_raw: dict) -> None:
-    """arq task handler for processing a call."""
+    """arq task handler: validates input, checks idempotency, delegates to process_call.
+
+    RetryableError → arq retry (up to max_tries), other errors → DLQ.
+    """
     settings: Settings = ctx["settings"]
     redis: Redis = ctx["redis"]
-    call_data = CallData.model_validate(call_data_raw)
+
+    call_id = call_data_raw.get("call_id", "unknown")
+    try:
+        call_data = CallData.model_validate(call_data_raw)
+    except ValidationError as exc:
+        await _add_to_dlq(
+            redis, call_id, f"Invalid call data: {exc}",
+            settings.ALERT_WEBHOOK_URL, call_data_raw,
+        )
+        return
+
     log = logger.bind(call_id=call_data.call_id)
 
     if await _is_processed(redis, call_data.call_id):
@@ -62,7 +76,7 @@ async def handle_call(ctx: dict, call_data_raw: dict) -> None:
         return
 
     job_try = ctx.get("job_try", 1)
-    max_tries = 2
+    max_tries = WorkerSettings.max_tries
 
     try:
         await process_call(
@@ -76,18 +90,18 @@ async def handle_call(ctx: dict, call_data_raw: dict) -> None:
         )
         await _mark_processed(redis, call_data.call_id)
         log.info("call_processed")
-    except TerminalError as exc:
+    except RetryableError as exc:
         if job_try >= max_tries:
-            # All arq retries exhausted — send to DLQ
             await _add_to_dlq(
                 redis, call_data.call_id, str(exc),
                 settings.ALERT_WEBHOOK_URL, call_data_raw,
             )
         else:
-            raise  # Let arq retry
+            raise
     except Exception as exc:
+        logger.error("unexpected_error", call_id=call_data.call_id, error=repr(exc))
         await _add_to_dlq(
-            redis, call_data.call_id, str(exc),
+            redis, call_data.call_id, repr(exc),
             settings.ALERT_WEBHOOK_URL, call_data_raw,
         )
 
@@ -123,9 +137,19 @@ async def startup(ctx: dict) -> None:
 
 async def shutdown(ctx: dict) -> None:
     """Cleanup shared resources."""
+    for name in ("bitrix", "llm"):
+        client = ctx.get(name)
+        if client:
+            try:
+                await client.close()
+            except Exception as exc:
+                logger.error("shutdown_close_failed", client=name, error=repr(exc))
     redis = ctx.get("redis")
     if redis:
-        await redis.aclose()
+        try:
+            await redis.aclose()
+        except Exception as exc:
+            logger.error("shutdown_redis_close_failed", error=repr(exc))
     logger.info("worker_stopped")
 
 
