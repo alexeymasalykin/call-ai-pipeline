@@ -1,11 +1,11 @@
 import hmac
 import json
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 
 import structlog
 from arq.connections import create_pool, RedisSettings
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
@@ -39,35 +39,46 @@ def create_app() -> FastAPI:
             raise HTTPException(503, detail="Redis unavailable")
 
     @app.post("/webhook")
-    async def webhook(request: Request, x_webhook_secret: str = Header()):
+    async def webhook(request: Request, secret: str = ""):
         settings: Settings = app.state.settings
-        if not hmac.compare_digest(x_webhook_secret, settings.WEBHOOK_SECRET):
+        if not secret or not hmac.compare_digest(secret, settings.WEBHOOK_SECRET):
             raise HTTPException(403, detail="Invalid webhook secret")
 
+        content_type = request.headers.get("content-type", "")
         try:
-            payload = await request.json()
-        except (json.JSONDecodeError, ValueError):
-            raise HTTPException(400, detail="Invalid JSON")
+            body = await request.body()
+            logger.info("webhook_raw_body", content_type=content_type, body=body.decode(errors="replace")[:500])
+            if "application/json" in content_type:
+                payload = json.loads(body)
+            else:
+                # Parse URL-encoded form data from raw bytes
+                parsed = parse_qs(body.decode(), keep_blank_values=True)
+                payload = {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}
+        except Exception as exc:
+            logger.error("webhook_parse_error", error=repr(exc), content_type=content_type)
+            raise HTTPException(400, detail="Invalid request body")
+
+        logger.info("webhook_received", payload=payload)
 
         try:
-            call_data = parse_webhook(payload, settings.MIN_CALL_DURATION)
+            pbx_call_id = parse_webhook(payload)
         except WebhookIgnored as exc:
             logger.info("webhook_ignored", reason=str(exc))
             return {"status": "ignored", "reason": str(exc)}
-        except (KeyError, ValidationError) as exc:
+        except KeyError as exc:
             raise HTTPException(400, detail=f"Invalid payload: {exc}")
 
         try:
             await app.state.arq.enqueue_job(
                 "handle_call",
-                call_data.model_dump(mode="json"),
+                pbx_call_id,
             )
         except Exception as exc:
-            logger.error("enqueue_failed", call_id=call_data.call_id, error=repr(exc))
+            logger.error("enqueue_failed", call_id=pbx_call_id, error=repr(exc))
             raise HTTPException(503, detail="Failed to enqueue call processing")
 
-        logger.info("call_enqueued", call_id=call_data.call_id)
-        return {"status": "enqueued", "call_id": call_data.call_id}
+        logger.info("call_enqueued", call_id=pbx_call_id)
+        return {"status": "enqueued", "call_id": pbx_call_id}
 
     def _verify_admin(authorization: str = Header()):
         settings: Settings = app.state.settings
@@ -95,18 +106,13 @@ def create_app() -> FastAPI:
                 logger.warning("dlq_corrupt_entry", raw=item[:200])
                 continue
             if data.get("call_id") == call_id:
-                has_call_data = "call_data" in data
                 await app.state.redis.lrem("failed_calls", 1, item)
-                if has_call_data:
-                    try:
-                        await app.state.arq.enqueue_job(
-                            "handle_call", data["call_data"],
-                        )
-                    except Exception as exc:
-                        logger.error("retry_enqueue_failed", call_id=call_id, error=repr(exc))
-                        raise HTTPException(503, detail="Failed to re-enqueue call")
-                status = "re-enqueued" if has_call_data else "removed_from_dlq"
-                return {"status": status, "call_id": call_id}
+                try:
+                    await app.state.arq.enqueue_job("handle_call", call_id)
+                except Exception as exc:
+                    logger.error("retry_enqueue_failed", call_id=call_id, error=repr(exc))
+                    raise HTTPException(503, detail="Failed to re-enqueue call")
+                return {"status": "re-enqueued", "call_id": call_id}
         raise HTTPException(404, detail=f"Call {call_id} not found in DLQ")
 
     return app

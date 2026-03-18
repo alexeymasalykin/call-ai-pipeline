@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 
-RUN mkdir -p /data/tmp && chown -R app:app /data
+RUN mkdir -p /data/tmp /data/failed_crm && chown -R app:app /data
 
 USER app
 

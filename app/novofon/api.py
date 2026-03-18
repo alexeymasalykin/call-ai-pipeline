@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -77,25 +78,41 @@ class NovofonAPI:
 
         return data["result"]
 
-    async def get_recording_url(self, call_id: str) -> str | None:
-        """Get recording URL from call report by communication_id.
+    async def get_call_info(self, call_id: str) -> dict:
+        """Fetch full call details from calls report by communication_id.
 
-        Returns first available recording URL or None if no recording.
+        Returns raw call dict with fields like direction, talk_duration,
+        contact_phone_number, virtual_phone_number, call_records, etc.
+        Raises DownloadError if call not found.
         """
+        # Novofon API doesn't support filtering by call ID,
+        # so we fetch today's report and search by id
+        now = datetime.now(timezone.utc)
+        date_from = (now - timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
+        date_till = (now + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
         result = await self._rpc_call("get.calls_report", {
-            "filter": {"id": int(call_id)},
-            "date_from": "2020-01-01 00:00:00",
-            "date_till": "2030-01-01 00:00:00",
+            "date_from": date_from,
+            "date_till": date_till,
         })
         calls = result.get("data", [])
-        if not calls:
-            return None
+        target_id = str(call_id)
+        for call in calls:
+            if str(call.get("id")) == target_id:
+                return call
+        raise DownloadError(f"Call {call_id} not found in Novofon API")
 
-        call = calls[0]
-        # call_records contains mp3, wav_call_records contains wav
-        records = call.get("call_records") or call.get("wav_call_records") or []
-        if records:
-            return records[0] if isinstance(records[0], str) else None
+    async def get_recording_url(self, call_id: str) -> str | None:
+        """Get recording download URL by communication_id.
+
+        Returns full URL or None if no recording.
+        """
+        try:
+            call_info = await self.get_call_info(call_id)
+        except DownloadError:
+            return None
+        records = call_info.get("call_records") or []
+        if records and isinstance(records[0], str):
+            return f"https://app.novofon.ru/system/media/talk/{call_id}/{records[0]}/"
         return None
 
     async def download_recording(self, call_id: str, recording_url: str | None = None) -> Path:

@@ -80,11 +80,13 @@ async def process_call(
 
         # 6. Attach analysis to deal or company in Bitrix24 (best-effort)
         start = time.monotonic()
-        phone = (
+        raw_phone = (
             call_data.called_number
             if call_data.direction == "outgoing"
             else call_data.caller_number
         )
+        # Bitrix24 expects phone with '+' prefix
+        phone = raw_phone if raw_phone.startswith("+") else f"+{raw_phone}"
         try:
             company = await bitrix.find_company_by_phone(phone)
             if not company:
