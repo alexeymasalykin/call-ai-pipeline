@@ -25,13 +25,15 @@ async def process_call(
     stt: SpeechKitClient,
     llm: LLMClient,
     bitrix: Bitrix24Client,
+    qa_entity_type_id: int = 0,
+    qa_field_map: dict[str, str] | None = None,
 ) -> None:
-    """Main pipeline: download -> S3 -> STT -> LLM -> CRM (best-effort).
+    """Main pipeline: download -> S3 -> STT -> LLM -> CRM -> QA (best-effort).
 
     Raises RetryableError on transient failures (download, S3 upload, STT transcription).
     EmptyTranscriptionError (not retryable) is handled internally with early return.
     LLMAnalysisError is terminal (worker sends to DLQ).
-    CRM failures are saved to /data/failed_crm/, not sent to DLQ.
+    CRM and QA failures are best-effort (logged, not sent to DLQ).
     """
     log = logger.bind(call_id=call_data.call_id)
     mp3_path = None
@@ -79,6 +81,7 @@ async def process_call(
             return
 
         # 6. Attach analysis to deal or company in Bitrix24 (best-effort)
+        deal = None
         start = time.monotonic()
         raw_phone = (
             call_data.called_number
@@ -92,34 +95,58 @@ async def process_call(
             if not company:
                 log.warning("company_not_found_saving_locally", phone=phone)
                 _save_failed_crm_result(log, call_data, analysis)
-                return
-
-            company_id = int(company["ID"])
-            deal = await bitrix.find_open_deal(company_id)
-            comment = _format_comment(analysis, call_data)
-
-            if deal:
-                deal_id = int(deal["ID"])
-                await bitrix.add_timeline_comment(
-                    "deal", deal_id, comment, audio_path=mp3_path,
-                )
-                log.info(
-                    "stage_complete", stage="crm",
-                    entity="deal", entity_id=deal_id,
-                    duration_ms=_elapsed(start),
-                )
             else:
-                await bitrix.add_timeline_comment(
-                    "company", company_id, comment, audio_path=mp3_path,
-                )
-                log.info(
-                    "stage_complete", stage="crm",
-                    entity="company", entity_id=company_id,
-                    duration_ms=_elapsed(start),
-                )
+                company_id = int(company["ID"])
+                deal = await bitrix.find_open_deal(company_id)
+                comment = _format_comment(analysis, call_data)
+
+                if deal:
+                    deal_id = int(deal["ID"])
+                    await bitrix.add_timeline_comment(
+                        "deal", deal_id, comment, audio_path=mp3_path,
+                    )
+                    log.info(
+                        "stage_complete", stage="crm",
+                        entity="deal", entity_id=deal_id,
+                        duration_ms=_elapsed(start),
+                    )
+                else:
+                    await bitrix.add_timeline_comment(
+                        "company", company_id, comment, audio_path=mp3_path,
+                    )
+                    log.info(
+                        "stage_complete", stage="crm",
+                        entity="company", entity_id=company_id,
+                        duration_ms=_elapsed(start),
+                    )
         except Bitrix24APIError as exc:
             log.error("crm_failed_saving_locally", error=str(exc))
             _save_failed_crm_result(log, call_data, analysis)
+
+        # 7. QA analysis for outgoing calls (best-effort)
+        if call_data.direction == "outgoing" and qa_entity_type_id and qa_field_map:
+            try:
+                start = time.monotonic()
+                qa_result = await llm.analyze_qa(
+                    transcript=transcript,
+                    manager_name=analysis.manager_name,
+                    duration=call_data.duration,
+                )
+                log.info("stage_complete", stage="qa_llm", duration_ms=_elapsed(start))
+
+                start = time.monotonic()
+                deal_id_for_qa = int(deal["ID"]) if deal else None
+                date_str = call_data.timestamp.strftime("%Y-%m-%d")
+                await bitrix.add_qa_item(
+                    qa=qa_result,
+                    entity_type_id=qa_entity_type_id,
+                    field_map=qa_field_map,
+                    deal_id=deal_id_for_qa,
+                    call_date=date_str,
+                )
+                log.info("stage_complete", stage="qa_crm", duration_ms=_elapsed(start))
+            except Exception as exc:
+                log.error("qa_failed", error=repr(exc))
 
     finally:
         if mp3_path and mp3_path.exists():

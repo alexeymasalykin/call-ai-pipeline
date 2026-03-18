@@ -141,6 +141,8 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
             stt=ctx["stt"],
             llm=ctx["llm"],
             bitrix=ctx["bitrix"],
+            qa_entity_type_id=settings.BITRIX24_QA_ENTITY_TYPE_ID,
+            qa_field_map=ctx["qa_field_map"],
         )
         await _mark_processed(redis, call_data.call_id)
         log.info("call_processed")
@@ -193,6 +195,7 @@ async def startup(ctx: dict) -> None:
         model=settings.LLM_MODEL,
     )
     ctx["bitrix"] = Bitrix24Client(webhook_url=settings.BITRIX24_WEBHOOK_URL)
+    ctx["qa_field_map"] = json.loads(settings.BITRIX24_QA_FIELD_MAP) if settings.BITRIX24_QA_FIELD_MAP else {}
     logger.info("worker_started")
 
 

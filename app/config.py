@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://api.proxyapi.ru/openai/v1"
 
     BITRIX24_WEBHOOK_URL: str
+    BITRIX24_QA_ENTITY_TYPE_ID: int = 1040
+    BITRIX24_QA_FIELD_MAP: str = '{}'
 
     REDIS_URL: str = "redis://redis:6379/0"
 

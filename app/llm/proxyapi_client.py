@@ -6,6 +6,8 @@ from pydantic import ValidationError
 
 from app.exceptions import LLMAnalysisError
 from app.llm.prompts import PROMPT_VERSION, SYSTEM_PROMPT, build_user_prompt
+from app.llm.qa_prompts import QA_SYSTEM_PROMPT, build_qa_user_prompt
+from app.models.qa_schemas import QAResponse
 from app.models.schemas import LLMResponse
 
 logger = structlog.get_logger()
@@ -52,6 +54,29 @@ class ProxyAPIClient:
             f"(prompt_version={PROMPT_VERSION})"
         )
 
+    async def analyze_qa(
+        self,
+        transcript: str,
+        manager_name: str | None,
+        duration: int,
+    ) -> QAResponse:
+        user_prompt = build_qa_user_prompt(transcript, manager_name, duration)
+        messages = [
+            {"role": "system", "content": QA_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        for attempt in range(_MAX_PARSE_ATTEMPTS):
+            raw = await self._call_llm(messages)
+            result = self._parse_qa_response(raw)
+            if result is not None:
+                return result
+            logger.warning(
+                "qa_invalid_json", attempt=attempt + 1, raw_response=raw[:200],
+            )
+        raise LLMAnalysisError(
+            f"QA LLM returned invalid JSON after {_MAX_PARSE_ATTEMPTS} attempts"
+        )
+
     async def _call_llm(self, messages: list[dict]) -> str:
         response = await self._client.chat.completions.create(
             model=self._model,
@@ -80,4 +105,16 @@ class ProxyAPIClient:
             return None
         except ValidationError as exc:
             logger.warning("llm_validation_error", errors=exc.errors())
+            return None
+
+    @staticmethod
+    def _parse_qa_response(raw: str) -> QAResponse | None:
+        try:
+            data = json.loads(raw)
+            return QAResponse.model_validate(data)
+        except json.JSONDecodeError as exc:
+            logger.warning("qa_json_decode_error", error=str(exc))
+            return None
+        except ValidationError as exc:
+            logger.warning("qa_validation_error", errors=exc.errors())
             return None

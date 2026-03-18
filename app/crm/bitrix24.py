@@ -6,6 +6,7 @@ import httpx
 import structlog
 
 from app.exceptions import Bitrix24APIError
+from app.models.qa_schemas import QAResponse
 
 logger = structlog.get_logger()
 _RATE_LIMIT_DELAY = 0.5
@@ -109,6 +110,62 @@ class Bitrix24Client:
                 f"Bitrix24 timeline comment failed: "
                 f"entity_type={entity_type}, entity_id={entity_id}"
             )
+
+    async def add_qa_item(
+        self,
+        qa: QAResponse,
+        entity_type_id: int,
+        field_map: dict[str, str],
+        deal_id: int | None = None,
+        call_date: str | None = None,
+    ) -> int:
+        """Create QA smart process item in Bitrix24. Returns item ID."""
+        mgr = qa.manager_name or "Неизвестен"
+        date = call_date or ""
+        title = f"Оценка {qa.total_score}/10 — {mgr} — {date}"
+
+        fields: dict = {"title": title}
+
+        # Map QA fields to Bitrix custom field codes
+        stage_map = {
+            "exit_to_dm_score": qa.stage_scores.exit_to_dm.score,
+            "opening_score": qa.stage_scores.opening.score,
+            "development_score": qa.stage_scores.development.score,
+            "closing_score": qa.stage_scores.closing.score,
+            "objection_score": qa.stage_scores.objection_handling.score,
+        }
+        string_map = {
+            "product_detected": qa.product_detected,
+            "segment_detected": qa.segment_detected,
+            "manager_name": mgr,
+            "summary": qa.summary,
+            "critical_errors": "\n".join(qa.critical_errors),
+            "strengths": "\n".join(qa.strengths),
+            "improvements": "\n".join(qa.improvements),
+        }
+
+        for key, value in {**string_map, **stage_map, "total_score": qa.total_score}.items():
+            bitrix_field = field_map.get(key)
+            if bitrix_field:
+                fields[bitrix_field] = value
+
+        if deal_id:
+            fields["parentId2"] = deal_id
+
+        result = await self._call(
+            "crm.item.add",
+            {"entityTypeId": entity_type_id, "fields": fields},
+        )
+        if "error" in result:
+            raise Bitrix24APIError(
+                f"Bitrix24 QA item failed: {result['error']} - "
+                f"{result.get('error_description', '')}"
+            )
+        item_id = result.get("result", {}).get("item", {}).get("id")
+        if not item_id:
+            raise Bitrix24APIError("Bitrix24 QA item created but no ID returned")
+        logger.info("qa_item_created", item_id=item_id, total_score=qa.total_score)
+        return item_id
 
     async def _call(self, method: str, data: dict) -> dict:
         await self._rate_limit()
