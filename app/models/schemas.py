@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -60,5 +61,16 @@ class LLMResponse(BaseModel, frozen=True):
         if isinstance(v, str) and not v.strip():
             return None
         return v
+
+
+@dataclass(frozen=True)
+class PendingDealBinding:
+    """Returned by pipeline when deal not found — worker schedules a retry."""
+
+    company_id: int
+    comment: str
+    qa_item_id: int | None
+    call_id: str
+    phone: str
 
 

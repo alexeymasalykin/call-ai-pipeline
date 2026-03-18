@@ -27,6 +27,9 @@ class Settings(BaseSettings):
 
     REDIS_URL: str = "redis://redis:6379/0"
 
+    CRM_RETRY_DELAY_SECONDS: int = Field(default=1800, gt=0)  # 30 min
+    CRM_RETRY_MAX_ATTEMPTS: int = Field(default=3, gt=0)
+
     MIN_CALL_DURATION: int = Field(default=15, gt=0)
     WEBHOOK_SECRET: str
     ALERT_WEBHOOK_URL: str = ""

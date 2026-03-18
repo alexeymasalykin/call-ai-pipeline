@@ -7,7 +7,7 @@ import structlog
 from app.crm.bitrix24 import Bitrix24Client
 from app.exceptions import Bitrix24APIError, EmptyTranscriptionError
 from app.llm.base import LLMClient
-from app.models.schemas import CallData, LLMResponse, Qualification
+from app.models.schemas import CallData, LLMResponse, PendingDealBinding, Qualification
 from app.novofon.api import NovofonAPI
 from app.stt.s3 import S3Client
 from app.stt.speechkit import SpeechKitClient
@@ -27,7 +27,7 @@ async def process_call(
     bitrix: Bitrix24Client,
     qa_entity_type_id: int = 0,
     qa_field_map: dict[str, str] | None = None,
-) -> None:
+) -> PendingDealBinding | None:
     """Main pipeline: download -> S3 -> STT -> LLM -> CRM -> QA (best-effort).
 
     Raises RetryableError on transient failures (download, S3 upload, STT transcription).
@@ -82,6 +82,7 @@ async def process_call(
 
         # 6. Attach analysis to deal or company in Bitrix24 (best-effort)
         deal = None
+        pending: PendingDealBinding | None = None
         start = time.monotonic()
         raw_phone = (
             call_data.called_number
@@ -90,6 +91,8 @@ async def process_call(
         )
         # Bitrix24 expects phone with '+' prefix
         phone = raw_phone if raw_phone.startswith("+") else f"+{raw_phone}"
+        comment = _format_comment(analysis, call_data)
+        company_id: int | None = None
         try:
             company = await bitrix.find_company_by_phone(phone)
             if not company:
@@ -98,7 +101,6 @@ async def process_call(
             else:
                 company_id = int(company["ID"])
                 deal = await bitrix.find_open_deal(company_id)
-                comment = _format_comment(analysis, call_data)
 
                 if deal:
                     deal_id = int(deal["ID"])
@@ -111,6 +113,7 @@ async def process_call(
                         duration_ms=_elapsed(start),
                     )
                 else:
+                    # Deal not yet created — attach to company now, retry later
                     await bitrix.add_timeline_comment(
                         "company", company_id, comment, audio_path=mp3_path,
                     )
@@ -124,6 +127,7 @@ async def process_call(
             _save_failed_crm_result(log, call_data, analysis)
 
         # 7. QA analysis for outgoing calls (best-effort)
+        qa_item_id: int | None = None
         if call_data.direction == "outgoing" and qa_entity_type_id and qa_field_map:
             try:
                 start = time.monotonic()
@@ -137,16 +141,30 @@ async def process_call(
                 start = time.monotonic()
                 deal_id_for_qa = int(deal["ID"]) if deal else None
                 date_str = call_data.timestamp.strftime("%Y-%m-%d")
-                await bitrix.add_qa_item(
+                qa_item_id = await bitrix.add_qa_item(
                     qa=qa_result,
                     entity_type_id=qa_entity_type_id,
                     field_map=qa_field_map,
                     deal_id=deal_id_for_qa,
                     call_date=date_str,
+                    audio_path=mp3_path,
                 )
                 log.info("stage_complete", stage="qa_crm", duration_ms=_elapsed(start))
             except Exception as exc:
                 log.error("qa_failed", error=repr(exc))
+
+        # 8. Schedule deferred deal binding if company found but no deal
+        if company_id and not deal:
+            pending = PendingDealBinding(
+                company_id=company_id,
+                comment=comment,
+                qa_item_id=qa_item_id,
+                call_id=call_data.call_id,
+                phone=phone,
+            )
+            log.info("deal_binding_deferred", company_id=company_id)
+
+        return pending
 
     finally:
         if mp3_path and mp3_path.exists():

@@ -91,13 +91,22 @@ class Bitrix24Client:
     async def add_timeline_comment(
         self, entity_type: str, entity_id: int, comment: str,
         audio_path: Path | None = None,
+        *,
+        entity_type_id: int | None = None,
     ) -> None:
-        """Add timeline comment with optional audio attachment."""
+        """Add timeline comment with optional audio attachment.
+
+        For standard entities (deal, company) use entity_type string.
+        For smart processes pass entity_type_id (numeric).
+        """
         fields: dict = {
             "ENTITY_ID": entity_id,
-            "ENTITY_TYPE": entity_type,
             "COMMENT": comment,
         }
+        if entity_type_id:
+            fields["ENTITY_TYPE_ID"] = entity_type_id
+        else:
+            fields["ENTITY_TYPE"] = entity_type
         if audio_path and audio_path.exists():
             encoded = base64.b64encode(audio_path.read_bytes()).decode()
             fields["FILES"] = {"fileData": [audio_path.name, encoded]}
@@ -118,6 +127,7 @@ class Bitrix24Client:
         field_map: dict[str, str],
         deal_id: int | None = None,
         call_date: str | None = None,
+        audio_path: Path | None = None,
     ) -> int:
         """Create QA smart process item in Bitrix24. Returns item ID."""
         mgr = qa.manager_name or "Неизвестен"
@@ -165,7 +175,39 @@ class Bitrix24Client:
         if not item_id:
             raise Bitrix24APIError("Bitrix24 QA item created but no ID returned")
         logger.info("qa_item_created", item_id=item_id, total_score=qa.total_score)
+
+        # Attach audio recording to QA item timeline
+        if audio_path and audio_path.exists():
+            try:
+                await self.add_timeline_comment(
+                    "", item_id, "Запись звонка",
+                    audio_path=audio_path,
+                    entity_type_id=entity_type_id,
+                )
+                logger.info("qa_audio_attached", item_id=item_id)
+            except Bitrix24APIError as exc:
+                logger.error("qa_audio_attach_failed", item_id=item_id, error=repr(exc))
+
         return item_id
+
+    async def update_qa_item_deal(
+        self, entity_type_id: int, item_id: int, deal_id: int,
+    ) -> None:
+        """Link existing QA smart process item to a deal."""
+        result = await self._call(
+            "crm.item.update",
+            {
+                "entityTypeId": entity_type_id,
+                "id": item_id,
+                "fields": {"parentId2": deal_id},
+            },
+        )
+        if "error" in result:
+            raise Bitrix24APIError(
+                f"Bitrix24 QA item update failed: {result['error']} - "
+                f"{result.get('error_description', '')}"
+            )
+        logger.info("qa_item_deal_linked", item_id=item_id, deal_id=deal_id)
 
     async def _call(self, method: str, data: dict) -> dict:
         await self._rate_limit()

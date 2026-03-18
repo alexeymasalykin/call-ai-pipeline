@@ -1,16 +1,16 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import structlog
-from arq.connections import RedisSettings
+from arq.connections import ArqRedis, RedisSettings, create_pool
 from redis.asyncio import Redis
 
 from app.config import Settings
 from app.crm.bitrix24 import Bitrix24Client
-from app.exceptions import PipelineError, RetryableError
+from app.exceptions import Bitrix24APIError, PipelineError, RetryableError
 from app.llm.proxyapi_client import ProxyAPIClient
-from app.models.schemas import CallData
+from app.models.schemas import CallData, PendingDealBinding
 from app.novofon.api import NovofonAPI
 from app.pipeline import process_call
 from app.stt.s3 import S3Client
@@ -134,7 +134,7 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
     max_tries = WorkerSettings.max_tries
 
     try:
-        await process_call(
+        pending = await process_call(
             call_data,
             novofon=novofon,
             s3=ctx["s3"],
@@ -146,6 +146,10 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
         )
         await _mark_processed(redis, call_data.call_id)
         log.info("call_processed")
+
+        # Schedule deferred deal binding if needed
+        if pending:
+            await _enqueue_crm_retry(ctx, pending, settings)
     except RetryableError as exc:
         if job_try >= max_tries:
             await _add_to_dlq(
@@ -167,6 +171,95 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
             settings.ALERT_WEBHOOK_URL, call_info,
         )
         raise
+
+
+async def _enqueue_crm_retry(
+    ctx: dict, pending: PendingDealBinding, settings: Settings,
+) -> None:
+    """Enqueue a deferred CRM deal binding task."""
+    pool: ArqRedis = ctx["arq"]
+    delay = timedelta(seconds=settings.CRM_RETRY_DELAY_SECONDS)
+    await pool.enqueue_job(
+        "retry_crm_binding",
+        pending.company_id,
+        pending.comment,
+        pending.qa_item_id,
+        pending.call_id,
+        pending.phone,
+        1,  # attempt
+        _defer_by=delay,
+    )
+    logger.info(
+        "crm_retry_scheduled",
+        call_id=pending.call_id,
+        company_id=pending.company_id,
+        delay_seconds=settings.CRM_RETRY_DELAY_SECONDS,
+    )
+
+
+async def retry_crm_binding(
+    ctx: dict,
+    company_id: int,
+    comment: str,
+    qa_item_id: int | None,
+    call_id: str,
+    phone: str,
+    attempt: int,
+) -> None:
+    """Deferred task: find deal for company, bind comment and QA item."""
+    settings: Settings = ctx["settings"]
+    bitrix: Bitrix24Client = ctx["bitrix"]
+    log = logger.bind(call_id=call_id, company_id=company_id, attempt=attempt)
+
+    log.info("crm_retry_started")
+
+    try:
+        deal = await bitrix.find_open_deal(company_id)
+    except Bitrix24APIError as exc:
+        log.error("crm_retry_api_error", error=repr(exc))
+        deal = None
+
+    if not deal:
+        if attempt < settings.CRM_RETRY_MAX_ATTEMPTS:
+            # Re-enqueue for next attempt
+            pool: ArqRedis = ctx["arq"]
+            delay = timedelta(seconds=settings.CRM_RETRY_DELAY_SECONDS)
+            await pool.enqueue_job(
+                "retry_crm_binding",
+                company_id, comment, qa_item_id, call_id, phone,
+                attempt + 1,
+                _defer_by=delay,
+            )
+            log.info(
+                "crm_retry_rescheduled",
+                next_attempt=attempt + 1,
+                delay_seconds=settings.CRM_RETRY_DELAY_SECONDS,
+            )
+        else:
+            log.warning("crm_retry_exhausted", max_attempts=settings.CRM_RETRY_MAX_ATTEMPTS)
+        return
+
+    deal_id = int(deal["ID"])
+    log = log.bind(deal_id=deal_id)
+
+    # Attach comment to the deal
+    try:
+        await bitrix.add_timeline_comment("deal", deal_id, comment)
+        log.info("crm_retry_comment_added")
+    except Bitrix24APIError as exc:
+        log.error("crm_retry_comment_failed", error=repr(exc))
+
+    # Link QA item to the deal
+    if qa_item_id:
+        try:
+            await bitrix.update_qa_item_deal(
+                entity_type_id=settings.BITRIX24_QA_ENTITY_TYPE_ID,
+                item_id=qa_item_id,
+                deal_id=deal_id,
+            )
+            log.info("crm_retry_qa_linked")
+        except Bitrix24APIError as exc:
+            log.error("crm_retry_qa_link_failed", error=repr(exc))
 
 
 async def startup(ctx: dict) -> None:
@@ -196,6 +289,7 @@ async def startup(ctx: dict) -> None:
     )
     ctx["bitrix"] = Bitrix24Client(webhook_url=settings.BITRIX24_WEBHOOK_URL)
     ctx["qa_field_map"] = json.loads(settings.BITRIX24_QA_FIELD_MAP) if settings.BITRIX24_QA_FIELD_MAP else {}
+    ctx["arq"] = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
     logger.info("worker_started")
 
 
@@ -208,6 +302,12 @@ async def shutdown(ctx: dict) -> None:
                 await client.close()
             except Exception as exc:
                 logger.error("shutdown_close_failed", client=name, error=repr(exc))
+    arq_pool = ctx.get("arq")
+    if arq_pool:
+        try:
+            await arq_pool.aclose()
+        except Exception as exc:
+            logger.error("shutdown_close_failed", client="arq", error=repr(exc))
     redis = ctx.get("redis")
     if redis:
         try:
@@ -218,7 +318,7 @@ async def shutdown(ctx: dict) -> None:
 
 
 class WorkerSettings:
-    functions = [handle_call]
+    functions = [handle_call, retry_crm_binding]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings(host="redis", port=6379, database=0)
