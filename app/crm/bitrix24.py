@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any
+import base64
+from pathlib import Path
 
 import httpx
 import structlog
@@ -88,16 +89,20 @@ class Bitrix24Client:
 
     async def add_timeline_comment(
         self, entity_type: str, entity_id: int, comment: str,
+        audio_path: Path | None = None,
     ) -> None:
+        """Add timeline comment with optional audio attachment."""
+        fields: dict = {
+            "ENTITY_ID": entity_id,
+            "ENTITY_TYPE": entity_type,
+            "COMMENT": comment,
+        }
+        if audio_path and audio_path.exists():
+            encoded = base64.b64encode(audio_path.read_bytes()).decode()
+            fields["FILES"] = {"fileData": [audio_path.name, encoded]}
         result = await self._call(
             "crm.timeline.comment.add",
-            {
-                "fields": {
-                    "ENTITY_ID": entity_id,
-                    "ENTITY_TYPE": entity_type,
-                    "COMMENT": comment,
-                }
-            },
+            {"fields": fields},
         )
         if result.get("result") is None:
             raise Bitrix24APIError(

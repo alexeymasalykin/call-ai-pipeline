@@ -104,6 +104,30 @@ class TestAddTimelineComment:
 
     @pytest.mark.asyncio
     @respx.mock
+    async def test_adds_comment_with_audio(self, client, tmp_path):
+        route = respx.post(f"{WEBHOOK_URL}crm.timeline.comment.add")
+        route.respond(200, json={"result": 789})
+        mp3 = tmp_path / "test.mp3"
+        mp3.write_bytes(b"fake-audio-data")
+        await client.add_timeline_comment("deal", 55, "text", audio_path=mp3)
+        request_body = route.calls[0].request.content
+        import json as _json
+        body = _json.loads(request_body)
+        assert "FILES" in body["fields"]
+        assert body["fields"]["FILES"]["fileData"][0] == "test.mp3"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_skips_audio_when_path_none(self, client):
+        route = respx.post(f"{WEBHOOK_URL}crm.timeline.comment.add")
+        route.respond(200, json={"result": 123})
+        await client.add_timeline_comment("deal", 55, "text", audio_path=None)
+        import json as _json
+        body = _json.loads(route.calls[0].request.content)
+        assert "FILES" not in body["fields"]
+
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_raises_on_null_result(self, client):
         respx.post(f"{WEBHOOK_URL}crm.timeline.comment.add").respond(200, json={"result": None})
         with pytest.raises(Bitrix24APIError, match="timeline comment failed"):

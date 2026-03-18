@@ -98,14 +98,18 @@ async def process_call(
 
             if deal:
                 deal_id = int(deal["ID"])
-                await bitrix.add_timeline_comment("deal", deal_id, comment)
+                await bitrix.add_timeline_comment(
+                    "deal", deal_id, comment, audio_path=mp3_path,
+                )
                 log.info(
                     "stage_complete", stage="crm",
                     entity="deal", entity_id=deal_id,
                     duration_ms=_elapsed(start),
                 )
             else:
-                await bitrix.add_timeline_comment("company", company_id, comment)
+                await bitrix.add_timeline_comment(
+                    "company", company_id, comment, audio_path=mp3_path,
+                )
                 log.info(
                     "stage_complete", stage="crm",
                     entity="company", entity_id=company_id,
