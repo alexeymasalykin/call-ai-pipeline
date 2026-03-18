@@ -1,7 +1,7 @@
 import pytest
 from datetime import datetime
 
-from app.models.schemas import CallData, LLMResponse, LeadData, Qualification, Sentiment
+from app.models.schemas import CallData, LLMResponse, Qualification, Sentiment
 
 
 class TestCallData:
@@ -161,31 +161,3 @@ class TestLLMResponse:
         )
         assert isinstance(data.sentiment, Sentiment)
         assert data.sentiment == Sentiment.NEGATIVE
-
-
-class TestLeadData:
-    def test_valid_lead(self):
-        data = LeadData(
-            title="Звонок: оптовые поставки",
-            client_name="Иван Петров", company="ООО Ромашка",
-            phone="79001234567",
-            summary="Клиент интересуется оптом.",
-            qualification="hot",
-        )
-        assert data.source == "CALL"
-        assert data.qualification == Qualification.HOT
-
-    def test_minimal_lead(self):
-        data = LeadData(
-            title="Звонок: неизвестный", phone="79001234567",
-            summary="Требует ручного анализа.", qualification="cold",
-        )
-        assert data.client_name is None
-        assert data.company is None
-
-    def test_invalid_qualification_rejected(self):
-        with pytest.raises(ValueError):
-            LeadData(
-                title="Тест", phone="79001234567",
-                summary="Тест.", qualification="invalid",
-            )

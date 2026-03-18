@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://redis:6379/0"
 
     MIN_CALL_DURATION: int = Field(default=15, gt=0)
-    SKIP_SPAM_LEADS: bool = False
     WEBHOOK_SECRET: str
     ALERT_WEBHOOK_URL: str = ""
     ADMIN_TOKEN: str

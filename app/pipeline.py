@@ -7,12 +7,14 @@ import structlog
 from app.crm.bitrix24 import Bitrix24Client
 from app.exceptions import Bitrix24APIError, EmptyTranscriptionError
 from app.llm.base import LLMClient
-from app.models.schemas import CallData, LeadData, LLMResponse, Qualification
+from app.models.schemas import CallData, LLMResponse, Qualification
 from app.novofon.api import NovofonAPI
 from app.stt.s3 import S3Client
 from app.stt.speechkit import SpeechKitClient
 
 logger = structlog.get_logger()
+
+_SKIP_QUALIFICATIONS = {Qualification.REJECTED, Qualification.SPAM}
 
 
 async def process_call(
@@ -23,9 +25,8 @@ async def process_call(
     stt: SpeechKitClient,
     llm: LLMClient,
     bitrix: Bitrix24Client,
-    skip_spam: bool = False,
 ) -> None:
-    """Main pipeline: download → S3 → STT → LLM → CRM (best-effort).
+    """Main pipeline: download -> S3 -> STT -> LLM -> CRM (best-effort).
 
     Raises RetryableError on transient failures (download, S3 upload, STT transcription).
     EmptyTranscriptionError (not retryable) is handled internally with early return.
@@ -72,49 +73,44 @@ async def process_call(
         )
         log.info("stage_complete", stage="llm", duration_ms=_elapsed(start))
 
-        # 5. Skip non-actionable leads
-        skip_qualifications = {Qualification.REJECTED}
-        if skip_spam:
-            skip_qualifications.add(Qualification.SPAM)
-        if analysis.qualification in skip_qualifications:
-            log.info("lead_skipped", qualification=analysis.qualification)
+        # 5. Skip non-actionable calls
+        if analysis.qualification in _SKIP_QUALIFICATIONS:
+            log.info("call_skipped", qualification=analysis.qualification)
             return
 
-        # 6. Find/create lead in Bitrix24 (best-effort: failures saved to /data/failed_crm/)
+        # 6. Attach analysis to deal or company in Bitrix24 (best-effort)
         start = time.monotonic()
-        title = f"Звонок: {analysis.summary[:50]}"
-        lead_id: int | None = None
+        phone = (
+            call_data.called_number
+            if call_data.direction == "outgoing"
+            else call_data.caller_number
+        )
         try:
-            lead = await bitrix.find_lead_by_phone(call_data.caller_number)
+            company = await bitrix.find_company_by_phone(phone)
+            if not company:
+                log.warning("company_not_found_saving_locally", phone=phone)
+                _save_failed_crm_result(log, call_data, analysis)
+                return
 
-            if lead:
-                try:
-                    lead_id = int(lead["ID"])
-                except (KeyError, ValueError, TypeError) as exc:
-                    raise Bitrix24APIError(
-                        f"Invalid lead response: {exc}"
-                    ) from exc
-                await bitrix.update_lead(lead_id, {
-                    "TITLE": title,
-                    "COMMENTS": analysis.summary,
-                })
-            else:
-                lead_data = LeadData(
-                    title=title,
-                    client_name=analysis.client_name,
-                    company=analysis.company,
-                    phone=call_data.caller_number,
-                    summary=analysis.summary,
-                    qualification=analysis.qualification,
+            company_id = int(company["ID"])
+            deal = await bitrix.find_open_deal(company_id)
+            comment = _format_comment(analysis)
+
+            if deal:
+                deal_id = int(deal["ID"])
+                await bitrix.add_timeline_comment("deal", deal_id, comment)
+                log.info(
+                    "stage_complete", stage="crm",
+                    entity="deal", entity_id=deal_id,
+                    duration_ms=_elapsed(start),
                 )
-                lead_id = await bitrix.create_lead(lead_data)
-
-            if lead_id is None:
-                raise Bitrix24APIError("lead_id not set after find/create")
-            await bitrix.add_timeline_comment(
-                "lead", lead_id, _format_comment(analysis),
-            )
-            log.info("stage_complete", stage="crm", duration_ms=_elapsed(start))
+            else:
+                await bitrix.add_timeline_comment("company", company_id, comment)
+                log.info(
+                    "stage_complete", stage="crm",
+                    entity="company", entity_id=company_id,
+                    duration_ms=_elapsed(start),
+                )
         except Bitrix24APIError as exc:
             log.error("crm_failed_saving_locally", error=str(exc))
             _save_failed_crm_result(log, call_data, analysis)

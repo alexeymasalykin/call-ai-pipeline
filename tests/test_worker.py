@@ -11,7 +11,6 @@ def _make_ctx(settings=None, redis=None, job_try=1):
     """Create a minimal arq worker context."""
     if settings is None:
         settings = AsyncMock()
-        settings.SKIP_SPAM_LEADS = False
         settings.ALERT_WEBHOOK_URL = ""
     if redis is None:
         redis = AsyncMock()

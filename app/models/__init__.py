@@ -1,3 +1,3 @@
-from app.models.schemas import CallData, LeadData, LLMResponse
+from app.models.schemas import CallData, LLMResponse
 
-__all__ = ["CallData", "LeadData", "LLMResponse"]
+__all__ = ["CallData", "LLMResponse"]

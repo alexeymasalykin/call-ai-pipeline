@@ -5,15 +5,13 @@ import httpx
 import structlog
 
 from app.exceptions import Bitrix24APIError
-from app.models.schemas import LeadData
 
 logger = structlog.get_logger()
-_EXCLUDED_STATUSES = {"CONVERTED", "JUNK"}
 _RATE_LIMIT_DELAY = 0.5
-_FIND_RETRY_DELAY = 10
-_FIND_MAX_RETRIES = 3
+_DEAL_RETRY_DELAY = 30
+_DEAL_MAX_RETRIES = 3
 _API_RETRY_DELAYS = (5, 10, 20)
-_API_RETRY_SCHEDULE = (*_API_RETRY_DELAYS, None)  # None = no sleep after final attempt
+_API_RETRY_SCHEDULE = (*_API_RETRY_DELAYS, None)
 
 
 def _mask_phone(phone: str) -> str:
@@ -31,55 +29,65 @@ class Bitrix24Client:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def find_lead_by_phone(self, phone: str) -> dict | None:
+    async def find_company_by_phone(self, phone: str) -> dict | None:
+        """Find company by phone number. Returns first match or None."""
         masked = _mask_phone(phone)
-        for attempt in range(1, _FIND_MAX_RETRIES + 1):
+        result = await self._call(
+            "crm.company.list",
+            {
+                "filter": {"PHONE": phone},
+                "select": ["ID", "TITLE"],
+            },
+        )
+        if "error" in result:
+            raise Bitrix24APIError(
+                f"Bitrix24 API error: {result['error']} - "
+                f"{result.get('error_description', '')}"
+            )
+        companies = result.get("result", [])
+        if companies:
+            logger.info("company_found", company_id=companies[0]["ID"], phone=masked)
+            return companies[0]
+        logger.warning("company_not_found", phone=masked)
+        return None
+
+    async def find_open_deal(self, company_id: int) -> dict | None:
+        """Find most recent open deal for company. Retries to allow manager creation delay."""
+        for attempt in range(1, _DEAL_MAX_RETRIES + 1):
             result = await self._call(
-                "crm.lead.list",
-                {"filter": {"PHONE": phone}, "select": ["ID", "STATUS_ID", "TITLE"]},
+                "crm.deal.list",
+                {
+                    "filter": {
+                        "COMPANY_ID": company_id,
+                        "!STAGE_ID": ["WON", "LOSE"],
+                    },
+                    "select": ["ID", "TITLE", "STAGE_ID"],
+                    "order": {"DATE_CREATE": "DESC"},
+                },
             )
             if "error" in result:
                 raise Bitrix24APIError(
                     f"Bitrix24 API error: {result['error']} - "
                     f"{result.get('error_description', '')}"
                 )
-            leads = result.get("result", [])
-            for lead in leads:
-                if lead.get("STATUS_ID") not in _EXCLUDED_STATUSES:
-                    logger.info("lead_found", lead_id=lead["ID"], attempt=attempt)
-                    return lead
-            if attempt < _FIND_MAX_RETRIES:
-                logger.info("lead_not_found_retry", phone=masked, attempt=attempt)
-                await asyncio.sleep(_FIND_RETRY_DELAY)
-        logger.warning("lead_not_found", phone=masked)
+            deals = result.get("result", [])
+            if deals:
+                logger.info(
+                    "deal_found", deal_id=deals[0]["ID"],
+                    company_id=company_id, attempt=attempt,
+                )
+                return deals[0]
+            if attempt < _DEAL_MAX_RETRIES:
+                logger.info(
+                    "deal_not_found_retry",
+                    company_id=company_id, attempt=attempt,
+                )
+                await asyncio.sleep(_DEAL_RETRY_DELAY)
+        logger.warning("deal_not_found", company_id=company_id)
         return None
 
-    async def create_lead(self, data: LeadData) -> int:
-        fields: dict[str, Any] = {
-            "TITLE": data.title,
-            "COMMENTS": data.summary,
-            "SOURCE_ID": data.source,
-            "STATUS_ID": "NEW",
-            "PHONE": [{"VALUE": data.phone, "VALUE_TYPE": "WORK"}],
-        }
-        if data.client_name:
-            fields["NAME"] = data.client_name
-        if data.company:
-            fields["COMPANY_TITLE"] = data.company
-        result = await self._call("crm.lead.add", {"fields": fields})
-        if "result" not in result:
-            raise Bitrix24APIError(f"Bitrix24 create lead: unexpected response {result!r}")
-        lead_id = result["result"]
-        logger.info("lead_created", lead_id=lead_id)
-        return lead_id
-
-    async def update_lead(self, lead_id: int, data: dict) -> None:
-        result = await self._call("crm.lead.update", {"id": lead_id, "fields": data})
-        if not result.get("result"):
-            raise Bitrix24APIError(f"Bitrix24 update lead {lead_id} returned falsy result")
-
     async def add_timeline_comment(
-        self, entity_type: str, entity_id: int, comment: str
+        self, entity_type: str, entity_id: int, comment: str,
     ) -> None:
         result = await self._call(
             "crm.timeline.comment.add",
@@ -114,7 +122,7 @@ class Bitrix24Client:
             except httpx.TransportError as exc:
                 last_exc = exc
             logger.warning(
-                "bitrix_retry", method=method, attempt=attempt, error=str(last_exc)
+                "bitrix_retry", method=method, attempt=attempt, error=str(last_exc),
             )
             if delay is not None:
                 await asyncio.sleep(delay)

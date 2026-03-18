@@ -22,7 +22,6 @@ class TestSettings:
         assert s.NOVOFON_LOGIN == "test_key"
         assert s.LLM_MODEL == "gpt-4o-mini"
         assert s.MIN_CALL_DURATION == 15
-        assert s.SKIP_SPAM_LEADS is False
         assert s.LOG_LEVEL == "INFO"
 
     def test_missing_required_var_raises(self, monkeypatch):

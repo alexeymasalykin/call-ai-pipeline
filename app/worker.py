@@ -88,7 +88,6 @@ async def handle_call(ctx: dict, call_data_raw: dict) -> None:
             stt=ctx["stt"],
             llm=ctx["llm"],
             bitrix=ctx["bitrix"],
-            skip_spam=settings.SKIP_SPAM_LEADS,
         )
         await _mark_processed(redis, call_data.call_id)
         log.info("call_processed")

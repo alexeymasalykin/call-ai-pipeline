@@ -62,13 +62,3 @@ class LLMResponse(BaseModel, frozen=True):
         return v
 
 
-class LeadData(BaseModel, frozen=True):
-    """Data for creating a lead in Bitrix24."""
-
-    title: str = Field(min_length=1)
-    client_name: str | None = None
-    company: str | None = None
-    phone: str = Field(min_length=1)
-    summary: str = Field(min_length=1)
-    qualification: Qualification
-    source: str = "CALL"

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.exceptions import Bitrix24APIError, DownloadError, EmptyTranscriptionError
-from app.models.schemas import CallData, LLMResponse
+from app.models.schemas import LLMResponse
 from app.pipeline import process_call
 from app.stt.speechkit import TranscriptSegment
 
@@ -37,7 +37,8 @@ def mock_deps():
     )
 
     bitrix = AsyncMock()
-    bitrix.find_lead_by_phone.return_value = {"ID": 42, "STATUS_ID": "NEW"}
+    bitrix.find_company_by_phone.return_value = {"ID": "10", "TITLE": "ООО Ромашка"}
+    bitrix.find_open_deal.return_value = {"ID": "55", "TITLE": "Сделка", "STAGE_ID": "NEW"}
 
     return {
         "novofon": novofon,
@@ -50,34 +51,63 @@ def mock_deps():
 
 class TestProcessCall:
     @pytest.mark.asyncio
-    async def test_full_pipeline_update_existing_lead(self, sample_call_data, mock_deps):
+    async def test_full_pipeline_comment_on_deal(self, sample_call_data, mock_deps):
         await process_call(sample_call_data, **mock_deps)
 
         mock_deps["novofon"].download_recording.assert_called_once()
         mock_deps["s3"].upload.assert_called_once()
         mock_deps["stt"].transcribe.assert_called_once()
         mock_deps["llm"].analyze_call.assert_called_once()
-        mock_deps["bitrix"].find_lead_by_phone.assert_called_once_with("79001234567")
-        mock_deps["bitrix"].update_lead.assert_called_once()
+        mock_deps["bitrix"].find_company_by_phone.assert_called_once()
+        mock_deps["bitrix"].find_open_deal.assert_called_once_with(10)
         mock_deps["bitrix"].add_timeline_comment.assert_called_once()
-        mock_deps["s3"].delete.assert_called_once()
+        # Incoming call — search by caller_number
+        assert mock_deps["bitrix"].find_company_by_phone.call_args[0][0] == "79001234567"
+        # Comment on deal
+        assert mock_deps["bitrix"].add_timeline_comment.call_args[0][0] == "deal"
+        assert mock_deps["bitrix"].add_timeline_comment.call_args[0][1] == 55
+
+    @pytest.mark.asyncio
+    async def test_outgoing_call_searches_by_called_number(self, mock_deps):
+        from datetime import datetime
+        from app.models.schemas import CallData
+
+        outgoing_call = CallData(
+            call_id="out-123", caller_number="74951234567",
+            called_number="79001234567", duration=60,
+            direction="outgoing", timestamp=datetime(2026, 3, 18, 10, 0, 0),
+        )
+        await process_call(outgoing_call, **mock_deps)
+
+        mock_deps["bitrix"].find_company_by_phone.assert_called_once_with("79001234567")
+
+    @pytest.mark.asyncio
+    async def test_no_deal_comments_on_company(self, sample_call_data, mock_deps):
+        mock_deps["bitrix"].find_open_deal.return_value = None
+
+        await process_call(sample_call_data, **mock_deps)
+
+        mock_deps["bitrix"].add_timeline_comment.assert_called_once()
+        assert mock_deps["bitrix"].add_timeline_comment.call_args[0][0] == "company"
+        assert mock_deps["bitrix"].add_timeline_comment.call_args[0][1] == 10
+
+    @pytest.mark.asyncio
+    @patch("app.pipeline._save_failed_crm_result")
+    async def test_company_not_found_saves_locally(self, mock_save, sample_call_data, mock_deps):
+        mock_deps["bitrix"].find_company_by_phone.return_value = None
+
+        await process_call(sample_call_data, **mock_deps)
+
+        mock_save.assert_called_once()
+        mock_deps["bitrix"].find_open_deal.assert_not_called()
+        mock_deps["bitrix"].add_timeline_comment.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_analyze_call_receives_direction(self, sample_call_data, mock_deps):
         await process_call(sample_call_data, **mock_deps)
 
-        call_kwargs = mock_deps["llm"].analyze_call.call_args
-        assert call_kwargs.kwargs["direction"] == "incoming"
-
-    @pytest.mark.asyncio
-    async def test_creates_lead_when_not_found(self, sample_call_data, mock_deps):
-        mock_deps["bitrix"].find_lead_by_phone.return_value = None
-        mock_deps["bitrix"].create_lead.return_value = 99
-
-        await process_call(sample_call_data, **mock_deps)
-
-        mock_deps["bitrix"].create_lead.assert_called_once()
-        mock_deps["bitrix"].add_timeline_comment.assert_called_once()
+        call_kwargs = mock_deps["llm"].analyze_call.call_args.kwargs
+        assert call_kwargs["direction"] == "incoming"
 
     @pytest.mark.asyncio
     async def test_empty_transcription_skips_llm(self, sample_call_data, mock_deps):
@@ -86,43 +116,31 @@ class TestProcessCall:
         await process_call(sample_call_data, **mock_deps)
 
         mock_deps["llm"].analyze_call.assert_not_called()
-        mock_deps["bitrix"].find_lead_by_phone.assert_not_called()
+        mock_deps["bitrix"].find_company_by_phone.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_spam_skipped_when_configured(self, sample_call_data, mock_deps):
+    async def test_spam_skipped(self, sample_call_data, mock_deps):
         mock_deps["llm"].analyze_call.return_value = LLMResponse(
             summary="Спам звонок.",
             qualification="spam",
             sentiment="neutral",
         )
 
-        await process_call(sample_call_data, skip_spam=True, **mock_deps)
+        await process_call(sample_call_data, **mock_deps)
 
-        mock_deps["bitrix"].find_lead_by_phone.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_spam_processed_when_not_skipped(self, sample_call_data, mock_deps):
-        mock_deps["llm"].analyze_call.return_value = LLMResponse(
-            summary="Спам звонок.",
-            qualification="spam",
-            sentiment="neutral",
-        )
-
-        await process_call(sample_call_data, skip_spam=False, **mock_deps)
-
-        mock_deps["bitrix"].find_lead_by_phone.assert_called_once()
+        mock_deps["bitrix"].find_company_by_phone.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_rejected_always_skipped(self, sample_call_data, mock_deps):
+    async def test_rejected_skipped(self, sample_call_data, mock_deps):
         mock_deps["llm"].analyze_call.return_value = LLMResponse(
             summary="Клиент отказал.",
             qualification="rejected",
             sentiment="negative",
         )
 
-        await process_call(sample_call_data, skip_spam=False, **mock_deps)
+        await process_call(sample_call_data, **mock_deps)
 
-        mock_deps["bitrix"].find_lead_by_phone.assert_not_called()
+        mock_deps["bitrix"].find_company_by_phone.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_download_error_propagates(self, sample_call_data, mock_deps):
@@ -134,7 +152,7 @@ class TestProcessCall:
     @pytest.mark.asyncio
     @patch("app.pipeline._save_failed_crm_result")
     async def test_bitrix_failure_saves_to_json(self, mock_save, sample_call_data, mock_deps):
-        mock_deps["bitrix"].find_lead_by_phone.side_effect = Bitrix24APIError("B24 down")
+        mock_deps["bitrix"].find_company_by_phone.side_effect = Bitrix24APIError("B24 down")
 
         await process_call(sample_call_data, **mock_deps)
 
