@@ -31,7 +31,7 @@ class TestS3Upload:
         mp3 = tmp_path / "test.mp3"
         mp3.write_bytes(b"data")
         uri = await s3_client.upload(mp3, "test.mp3")
-        assert uri == "s3://test-bucket/test.mp3"
+        assert uri == "https://storage.test/test-bucket/test.mp3"
 
     @pytest.mark.asyncio
     async def test_upload_retries_on_failure(self, s3_client, tmp_path):
@@ -41,7 +41,7 @@ class TestS3Upload:
             _make_client_error(), _make_client_error(), None,
         ]
         uri = await s3_client.upload(mp3, "test.mp3")
-        assert uri == "s3://test-bucket/test.mp3"
+        assert uri == "https://storage.test/test-bucket/test.mp3"
 
     @pytest.mark.asyncio
     async def test_upload_raises_after_exhaustion(self, s3_client, tmp_path):

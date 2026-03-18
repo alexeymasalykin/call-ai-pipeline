@@ -16,6 +16,7 @@ _RETRY_SCHEDULE = (*_RETRY_DELAYS, None)  # None = no sleep after final attempt
 class S3Client:
     def __init__(self, bucket: str, access_key: str, secret_key: str, endpoint: str) -> None:
         self._bucket = bucket
+        self._endpoint = endpoint
         self._s3 = boto3.client(
             "s3",
             endpoint_url=endpoint,
@@ -31,7 +32,7 @@ class S3Client:
                     None,
                     partial(self._s3.upload_file, str(local_path), self._bucket, s3_key),
                 )
-                uri = f"s3://{self._bucket}/{s3_key}"
+                uri = f"{self._endpoint}/{self._bucket}/{s3_key}"
                 logger.info("s3_uploaded", key=s3_key, attempt=attempt)
                 return uri
             except (ClientError, BotoCoreError) as exc:

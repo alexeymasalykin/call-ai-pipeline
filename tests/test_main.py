@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 def test_settings(monkeypatch):
     """Set all required env vars for Settings."""
     env = {
-        "NOVOFON_API_KEY": "k", "NOVOFON_API_SECRET": "s",
+        "NOVOFON_LOGIN": "k", "NOVOFON_PASSWORD": "s",
         "YANDEX_CLOUD_FOLDER_ID": "f", "YANDEX_CLOUD_SA_KEY_FILE": "sa.json",
         "YANDEX_S3_BUCKET": "b", "YANDEX_S3_ACCESS_KEY": "ak",
         "YANDEX_S3_SECRET_KEY": "sk",

@@ -9,6 +9,7 @@ class Qualification(StrEnum):
     HOT = "hot"
     WARM = "warm"
     COLD = "cold"
+    REJECTED = "rejected"
     SPAM = "spam"
 
 
@@ -35,16 +36,23 @@ class LLMResponse(BaseModel, frozen=True):
 
     client_name: str | None = None
     company: str | None = None
-    request: str | None = None
+    client_request: str | None = None
+    our_offer: str | None = None
     budget_mentioned: str | None = None
     summary: str = Field(min_length=1)
     qualification: Qualification
     sentiment: Sentiment
     next_action: str | None = None
+    objections: list[str] = Field(default_factory=list)
+    pain_points: list[str] = Field(default_factory=list)
+    decision_maker: bool | None = None
+    manager_name: str | None = None
+    call_direction: str | None = None
     tags: list[str] = Field(default_factory=list)
 
     @field_validator(
-        "client_name", "company", "request", "budget_mentioned", "next_action",
+        "client_name", "company", "client_request", "our_offer",
+        "budget_mentioned", "next_action", "manager_name",
         mode="before",
     )
     @classmethod

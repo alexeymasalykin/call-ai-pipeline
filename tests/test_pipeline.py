@@ -16,7 +16,7 @@ def mock_deps():
     novofon.download_recording.return_value = Path("/tmp/test.mp3")
 
     s3 = AsyncMock()
-    s3.upload.return_value = "s3://bucket/test.mp3"
+    s3.upload.return_value = "https://storage.yandexcloud.net/bucket/test.mp3"
 
     stt = AsyncMock()
     stt.transcribe.return_value = [
@@ -63,6 +63,13 @@ class TestProcessCall:
         mock_deps["s3"].delete.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_analyze_call_receives_direction(self, sample_call_data, mock_deps):
+        await process_call(sample_call_data, **mock_deps)
+
+        call_kwargs = mock_deps["llm"].analyze_call.call_args
+        assert call_kwargs.kwargs["direction"] == "incoming"
+
+    @pytest.mark.asyncio
     async def test_creates_lead_when_not_found(self, sample_call_data, mock_deps):
         mock_deps["bitrix"].find_lead_by_phone.return_value = None
         mock_deps["bitrix"].create_lead.return_value = 99
@@ -104,6 +111,18 @@ class TestProcessCall:
         await process_call(sample_call_data, skip_spam=False, **mock_deps)
 
         mock_deps["bitrix"].find_lead_by_phone.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_rejected_always_skipped(self, sample_call_data, mock_deps):
+        mock_deps["llm"].analyze_call.return_value = LLMResponse(
+            summary="Клиент отказал.",
+            qualification="rejected",
+            sentiment="negative",
+        )
+
+        await process_call(sample_call_data, skip_spam=False, **mock_deps)
+
+        mock_deps["bitrix"].find_lead_by_phone.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_download_error_propagates(self, sample_call_data, mock_deps):

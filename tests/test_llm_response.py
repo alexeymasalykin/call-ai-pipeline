@@ -31,12 +31,18 @@ class TestProxyAPIClient:
         valid_json = json.dumps({
             "client_name": "Иван",
             "company": None,
-            "request": "Консультация",
+            "client_request": "Консультация",
+            "our_offer": None,
             "budget_mentioned": None,
             "summary": "Клиент позвонил для консультации.",
             "qualification": "warm",
             "next_action": "Перезвонить",
             "sentiment": "neutral",
+            "objections": [],
+            "pain_points": [],
+            "decision_maker": None,
+            "manager_name": None,
+            "call_direction": "incoming",
             "tags": ["консультация"],
         })
         with patch.object(
@@ -46,23 +52,31 @@ class TestProxyAPIClient:
             return_value=_make_completion(valid_json),
         ):
             result = await client.analyze_call(
-                transcript="тест", caller_number="79001234567", duration=30
+                transcript="тест", caller_number="79001234567",
+                duration=30, direction="incoming",
             )
             assert isinstance(result, LLMResponse)
             assert result.client_name == "Иван"
             assert result.qualification == "warm"
+            assert result.call_direction == "incoming"
 
     @pytest.mark.asyncio
     async def test_analyze_call_invalid_json_retries(self, client):
         valid_json = json.dumps({
             "client_name": None,
             "company": None,
-            "request": None,
+            "client_request": None,
+            "our_offer": None,
             "budget_mentioned": None,
             "summary": "Тест.",
             "qualification": "cold",
             "next_action": None,
             "sentiment": "neutral",
+            "objections": [],
+            "pain_points": [],
+            "decision_maker": None,
+            "manager_name": None,
+            "call_direction": "incoming",
             "tags": [],
         })
         with patch.object(
@@ -75,7 +89,8 @@ class TestProxyAPIClient:
             ],
         ):
             result = await client.analyze_call(
-                transcript="тест", caller_number="79001234567", duration=30
+                transcript="тест", caller_number="79001234567",
+                duration=30, direction="incoming",
             )
             assert result.summary == "Тест."
 
@@ -92,13 +107,12 @@ class TestProxyAPIClient:
         ):
             with pytest.raises(LLMAnalysisError, match="invalid JSON after 2 attempts"):
                 await client.analyze_call(
-                    transcript="тест", caller_number="79001234567", duration=30
+                    transcript="тест", caller_number="79001234567",
+                    duration=30, direction="incoming",
                 )
 
     @pytest.mark.asyncio
     async def test_analyze_call_empty_content_raises_error(self, client):
-        from app.exceptions import LLMAnalysisError
-
         choice = MagicMock()
         choice.message.content = None
         choice.finish_reason = "content_filter"
@@ -113,5 +127,6 @@ class TestProxyAPIClient:
         ):
             with pytest.raises(LLMAnalysisError, match="empty content"):
                 await client.analyze_call(
-                    transcript="тест", caller_number="79001234567", duration=30
+                    transcript="тест", caller_number="79001234567",
+                    duration=30, direction="incoming",
                 )

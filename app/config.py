@@ -7,8 +7,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    NOVOFON_API_KEY: str
-    NOVOFON_API_SECRET: str
+    NOVOFON_LOGIN: str
+    NOVOFON_PASSWORD: str
 
     YANDEX_CLOUD_FOLDER_ID: str
     YANDEX_CLOUD_SA_KEY_FILE: str = "service_account_key.json"

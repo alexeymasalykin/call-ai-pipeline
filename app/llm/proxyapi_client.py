@@ -23,9 +23,15 @@ class ProxyAPIClient:
         await self._client.close()
 
     async def analyze_call(
-        self, transcript: str, caller_number: str, duration: int
+        self,
+        transcript: str,
+        caller_number: str,
+        duration: int,
+        direction: str,
     ) -> LLMResponse:
-        user_prompt = build_user_prompt(transcript, caller_number, duration)
+        user_prompt = build_user_prompt(
+            transcript, caller_number, duration, direction,
+        )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},

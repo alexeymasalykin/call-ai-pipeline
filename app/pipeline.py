@@ -68,12 +68,16 @@ async def process_call(
             transcript=transcript,
             caller_number=call_data.caller_number,
             duration=call_data.duration,
+            direction=call_data.direction,
         )
         log.info("stage_complete", stage="llm", duration_ms=_elapsed(start))
 
-        # 5. Skip spam if configured
-        if analysis.qualification == Qualification.SPAM and skip_spam:
-            log.info("spam_skipped")
+        # 5. Skip non-actionable leads
+        skip_qualifications = {Qualification.REJECTED}
+        if skip_spam:
+            skip_qualifications.add(Qualification.SPAM)
+        if analysis.qualification in skip_qualifications:
+            log.info("lead_skipped", qualification=analysis.qualification)
             return
 
         # 6. Find/create lead in Bitrix24 (best-effort: failures saved to /data/failed_crm/)
@@ -146,14 +150,26 @@ def _save_failed_crm_result(
 
 def _format_comment(analysis: LLMResponse) -> str:
     tags = ", ".join(analysis.tags) if analysis.tags else "-"
-    return (
-        f"AI-анализ звонка:\n\n"
-        f"{analysis.summary}\n\n"
-        f"Квалификация: {analysis.qualification}\n"
-        f"Настроение: {analysis.sentiment}\n"
-        f"Следующий шаг: {analysis.next_action or '-'}\n"
-        f"Теги: {tags}"
+    objections = "; ".join(analysis.objections) if analysis.objections else "-"
+    pain_points = "; ".join(analysis.pain_points) if analysis.pain_points else "-"
+    direction_label = (
+        "Исходящий" if analysis.call_direction == "outgoing" else "Входящий"
     )
+    lines = [
+        f"AI-анализ звонка ({direction_label}):\n",
+        analysis.summary,
+        "",
+        f"Квалификация: {analysis.qualification}",
+        f"Настроение: {analysis.sentiment}",
+        f"ЛПР: {'Да' if analysis.decision_maker else 'Нет' if analysis.decision_maker is False else '?'}",
+        f"Запрос клиента: {analysis.client_request or '-'}",
+        f"Наше предложение: {analysis.our_offer or '-'}",
+        f"Возражения: {objections}",
+        f"Боли клиента: {pain_points}",
+        f"Следующий шаг: {analysis.next_action or '-'}",
+        f"Теги: {tags}",
+    ]
+    return "\n".join(lines)
 
 
 def _elapsed(start: float) -> int:

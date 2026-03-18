@@ -124,8 +124,8 @@ async def startup(ctx: dict) -> None:
     ctx["settings"] = settings
     ctx["redis"] = Redis.from_url(settings.REDIS_URL)
     ctx["novofon"] = NovofonAPI(
-        api_key=settings.NOVOFON_API_KEY,
-        api_secret=settings.NOVOFON_API_SECRET,
+        login=settings.NOVOFON_LOGIN,
+        password=settings.NOVOFON_PASSWORD,
         data_dir="/data/tmp",
     )
     ctx["s3"] = S3Client(

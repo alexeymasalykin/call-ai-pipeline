@@ -13,7 +13,8 @@ class TestDownloadRetryDelays:
     @pytest.mark.asyncio
     @respx.mock
     async def test_retries_correct_number_of_times(self, tmp_path):
-        api = NovofonAPI(api_key="k", api_secret="s", data_dir=str(tmp_path))
+        api = NovofonAPI(login="k", password="s", data_dir=str(tmp_path))
+        api._access_token = "fake"
         url = "https://novofon.com/records/123.mp3"
 
         call_count = 0
@@ -34,7 +35,8 @@ class TestDownloadRetryDelays:
     @pytest.mark.asyncio
     @respx.mock
     async def test_raises_after_all_retries_exhausted(self, tmp_path):
-        api = NovofonAPI(api_key="k", api_secret="s", data_dir=str(tmp_path))
+        api = NovofonAPI(login="k", password="s", data_dir=str(tmp_path))
+        api._access_token = "fake"
         url = "https://novofon.com/records/123.mp3"
         respx.get(url).mock(return_value=httpx.Response(503))
 

@@ -77,13 +77,20 @@ class TestLLMResponse:
     def test_valid_full_response(self):
         data = LLMResponse(
             client_name="Иван Петров", company="ООО Ромашка",
-            request="Оптовые поставки", budget_mentioned="500 000 руб",
+            client_request="Оптовые поставки", our_offer="Автоматизация склада",
+            budget_mentioned="500 000 руб",
             summary="Клиент интересуется оптовыми поставками.",
             qualification="hot", next_action="Отправить КП",
             sentiment="positive", tags=["опт", "КП"],
+            objections=["дорого"], pain_points=["ручной учёт"],
+            decision_maker=True, manager_name="Софья",
+            call_direction="outgoing",
         )
         assert data.qualification == Qualification.HOT
         assert len(data.tags) == 2
+        assert data.objections == ["дорого"]
+        assert data.decision_maker is True
+        assert data.call_direction == "outgoing"
 
     def test_minimal_response_with_nulls(self):
         data = LLMResponse(
@@ -92,19 +99,27 @@ class TestLLMResponse:
         )
         assert data.client_name is None
         assert data.company is None
+        assert data.client_request is None
+        assert data.our_offer is None
         assert data.tags == []
+        assert data.objections == []
+        assert data.pain_points == []
+        assert data.decision_maker is None
 
     def test_empty_strings_become_none(self):
         data = LLMResponse(
             summary="Тест.", qualification="cold", sentiment="neutral",
-            client_name="", company="  ", request="\t",
-            budget_mentioned="  \n  ", next_action="",
+            client_name="", company="  ", client_request="\t",
+            our_offer="", budget_mentioned="  \n  ", next_action="",
+            manager_name="  ",
         )
         assert data.client_name is None
         assert data.company is None
-        assert data.request is None
+        assert data.client_request is None
+        assert data.our_offer is None
         assert data.budget_mentioned is None
         assert data.next_action is None
+        assert data.manager_name is None
 
     def test_non_empty_strings_preserved(self):
         data = LLMResponse(
@@ -113,6 +128,13 @@ class TestLLMResponse:
         )
         assert data.client_name == "Иван"
         assert data.company == "ООО Ромашка"
+
+    def test_rejected_qualification(self):
+        data = LLMResponse(
+            summary="Клиент отказал.", qualification="rejected",
+            sentiment="negative",
+        )
+        assert data.qualification == Qualification.REJECTED
 
     def test_invalid_qualification_rejected(self):
         with pytest.raises(ValueError):
