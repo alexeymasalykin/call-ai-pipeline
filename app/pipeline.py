@@ -96,7 +96,7 @@ async def process_call(
 
             company_id = int(company["ID"])
             deal = await bitrix.find_open_deal(company_id)
-            comment = _format_comment(analysis)
+            comment = _format_comment(analysis, call_data)
 
             if deal:
                 deal_id = int(deal["ID"])
@@ -150,25 +150,54 @@ def _save_failed_crm_result(
         )
 
 
-def _format_comment(analysis: LLMResponse) -> str:
-    tags = ", ".join(analysis.tags) if analysis.tags else "-"
-    objections = "; ".join(analysis.objections) if analysis.objections else "-"
-    pain_points = "; ".join(analysis.pain_points) if analysis.pain_points else "-"
+_QUALIFICATION_RU = {
+    "hot": "Горячий",
+    "warm": "Тёплый",
+    "cold": "Холодный",
+    "rejected": "Отказ",
+    "spam": "Спам",
+}
+
+_SENTIMENT_RU = {
+    "positive": "Позитивное",
+    "neutral": "Нейтральное",
+    "negative": "Негативное",
+}
+
+
+def _format_comment(analysis: LLMResponse, call_data: CallData) -> str:
     direction_label = (
         "Исходящий" if analysis.call_direction == "outgoing" else "Входящий"
     )
+    date_str = call_data.timestamp.strftime("%d.%m.%Y")
+    qualification = _QUALIFICATION_RU.get(analysis.qualification, analysis.qualification)
+    sentiment = _SENTIMENT_RU.get(analysis.sentiment, analysis.sentiment)
+    decision_maker = "Да" if analysis.decision_maker else "Нет" if analysis.decision_maker is False else "?"
+    objections = "; ".join(analysis.objections) if analysis.objections else "-"
+    pain_points = "; ".join(analysis.pain_points) if analysis.pain_points else "-"
+    tags = ", ".join(analysis.tags) if analysis.tags else "-"
+
     lines = [
-        f"AI-анализ звонка ({direction_label}):\n",
+        "━━ Анализ звонка ━━",
+        f"{direction_label} · {call_data.duration} сек · {date_str}",
+        "",
         analysis.summary,
         "",
-        f"Квалификация: {analysis.qualification}",
-        f"Настроение: {analysis.sentiment}",
-        f"ЛПР: {'Да' if analysis.decision_maker else 'Нет' if analysis.decision_maker is False else '?'}",
-        f"Запрос клиента: {analysis.client_request or '-'}",
-        f"Наше предложение: {analysis.our_offer or '-'}",
+        "──── Детали ────",
+        f"Квалификация: {qualification}",
+        f"Настроение: {sentiment}",
+        f"ЛПР: {decision_maker}",
+        f"Менеджер: {analysis.manager_name or '-'}",
+        "",
+        "──── Клиент ────",
+        f"Запрос: {analysis.client_request or '-'}",
         f"Возражения: {objections}",
-        f"Боли клиента: {pain_points}",
+        f"Боли: {pain_points}",
+        "",
+        "──── Итог ────",
+        f"Наше предложение: {analysis.our_offer or '-'}",
         f"Следующий шаг: {analysis.next_action or '-'}",
+        "",
         f"Теги: {tags}",
     ]
     return "\n".join(lines)
