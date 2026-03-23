@@ -1,0 +1,38 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-b24-bg: #eef2f5;
+  --color-b24-surface: #ffffff;
+  --color-b24-surface-hover: #f8fafe;
+  --color-b24-border: #e0e2e5;
+  --color-b24-border-light: #eceef0;
+  --color-b24-text: #333333;
+  --color-b24-text-secondary: #959ca4;
+  --color-b24-text-light: #a8adb4;
+  --color-b24-blue: #2fc6f6;
+  --color-b24-blue-dark: #0fa8d8;
+  --color-b24-blue-bg: rgba(47, 198, 246, 0.08);
+  --color-b24-green: #9dcf00;
+  --color-b24-green-bg: rgba(157, 207, 0, 0.1);
+  --color-b24-red: #ff5752;
+  --color-b24-red-bg: rgba(255, 87, 82, 0.08);
+  --color-b24-yellow: #ffa900;
+  --color-b24-yellow-bg: rgba(255, 169, 0, 0.1);
+  --color-b24-violet: #9985f3;
+}
+
+body {
+  background: var(--color-b24-bg);
+  color: var(--color-b24-text);
+  font-family: "Open Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  margin: 0;
+}
+
+.b24-card {
+  background: var(--color-b24-surface);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* Force cache bust v2 */
