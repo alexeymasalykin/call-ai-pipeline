@@ -143,6 +143,7 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
             bitrix=ctx["bitrix"],
             qa_entity_type_id=settings.BITRIX24_QA_ENTITY_TYPE_ID,
             qa_field_map=ctx["qa_field_map"],
+            company_segment_field=settings.BITRIX24_COMPANY_SEGMENT_FIELD,
         )
         await _mark_processed(redis, call_data.call_id)
         log.info("call_processed")

@@ -86,19 +86,19 @@ class NovofonAPI:
         Raises DownloadError if call not found.
         """
         # Novofon API doesn't support filtering by call ID,
-        # so we fetch today's report and search by id
+        # so we search in progressively wider date windows
         now = datetime.now(timezone.utc)
-        date_from = (now - timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
-        date_till = (now + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
-        result = await self._rpc_call("get.calls_report", {
-            "date_from": date_from,
-            "date_till": date_till,
-        })
-        calls = result.get("data", [])
         target_id = str(call_id)
-        for call in calls:
-            if str(call.get("id")) == target_id:
-                return call
+        for days_back in (1, 7, 30):
+            date_from = (now - timedelta(days=days_back)).strftime("%Y-%m-%d 00:00:00")
+            date_till = (now + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
+            result = await self._rpc_call("get.calls_report", {
+                "date_from": date_from,
+                "date_till": date_till,
+            })
+            for call in result.get("data", []):
+                if str(call.get("id")) == target_id:
+                    return call
         raise DownloadError(f"Call {call_id} not found in Novofon API")
 
     async def get_recording_url(self, call_id: str) -> str | None:

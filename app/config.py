@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     BITRIX24_WEBHOOK_URL: str
     BITRIX24_QA_ENTITY_TYPE_ID: int = 1040
     BITRIX24_QA_FIELD_MAP: str = '{}'
+    BITRIX24_COMPANY_SEGMENT_FIELD: str = ""
 
     REDIS_URL: str = "redis://redis:6379/0"
 

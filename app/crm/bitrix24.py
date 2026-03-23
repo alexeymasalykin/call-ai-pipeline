@@ -31,14 +31,19 @@ class Bitrix24Client:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def find_company_by_phone(self, phone: str) -> dict | None:
+    async def find_company_by_phone(
+        self, phone: str, extra_fields: list[str] | None = None,
+    ) -> dict | None:
         """Find company by phone number. Returns first match or None."""
         masked = _mask_phone(phone)
+        select = ["ID", "TITLE", "ASSIGNED_BY_ID"]
+        if extra_fields:
+            select.extend(extra_fields)
         result = await self._call(
             "crm.company.list",
             {
                 "filter": {"PHONE": phone},
-                "select": ["ID", "TITLE"],
+                "select": select,
             },
         )
         if "error" in result:
@@ -51,6 +56,32 @@ class Bitrix24Client:
             logger.info("company_found", company_id=companies[0]["ID"], phone=masked)
             return companies[0]
         logger.warning("company_not_found", phone=masked)
+        return None
+
+    async def get_user_name(self, user_id: int) -> str | None:
+        """Get user full name by ID. Returns None on failure."""
+        try:
+            result = await self._call("user.get", {"ID": user_id})
+        except Bitrix24APIError:
+            logger.warning("user_get_failed", user_id=user_id)
+            return None
+        users = result.get("result", [])
+        if not users:
+            return None
+        u = users[0]
+        name = f"{u.get('NAME', '')} {u.get('LAST_NAME', '')}".strip()
+        return name or None
+
+    async def resolve_enum_value(
+        self, entity: str, field_name: str, enum_id: str | int,
+    ) -> str | None:
+        """Resolve enumeration field ID to display value."""
+        method = f"crm.{entity}.fields"
+        result = await self._call(method, {})
+        field_def = result.get("result", {}).get(field_name, {})
+        for item in field_def.get("items", []):
+            if str(item.get("ID")) == str(enum_id):
+                return item.get("VALUE")
         return None
 
     async def find_open_deal(self, company_id: int) -> dict | None:
@@ -128,9 +159,11 @@ class Bitrix24Client:
         deal_id: int | None = None,
         call_date: str | None = None,
         audio_path: Path | None = None,
+        manager_name: str | None = None,
+        segment: str | None = None,
     ) -> int:
         """Create QA smart process item in Bitrix24. Returns item ID."""
-        mgr = qa.manager_name or "Неизвестен"
+        mgr = manager_name or qa.manager_name or "Неизвестен"
         date = call_date or ""
         title = f"Оценка {qa.total_score}/10 — {mgr} — {date}"
 
@@ -146,7 +179,7 @@ class Bitrix24Client:
         }
         string_map = {
             "product_detected": qa.product_detected,
-            "segment_detected": qa.segment_detected,
+            "segment_detected": segment or qa.segment_detected,
             "manager_name": mgr,
             "summary": qa.summary,
             "critical_errors": "\n".join(qa.critical_errors),
@@ -156,7 +189,7 @@ class Bitrix24Client:
 
         for key, value in {**string_map, **stage_map, "total_score": qa.total_score}.items():
             bitrix_field = field_map.get(key)
-            if bitrix_field:
+            if bitrix_field and value is not None:
                 fields[bitrix_field] = value
 
         if deal_id:

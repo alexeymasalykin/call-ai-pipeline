@@ -4,22 +4,23 @@ from pydantic import BaseModel, Field
 
 
 class QAStageScore(BaseModel, frozen=True):
-    score: int = Field(ge=0, le=10)
-    passed: bool
+    score: int | None = Field(default=None, ge=0, le=10)
+    passed: bool | None = None
     comment: str | None = None
 
 
 class QAStageScores(BaseModel, frozen=True):
-    exit_to_dm: QAStageScore
-    opening: QAStageScore
-    development: QAStageScore
-    closing: QAStageScore
-    objection_handling: QAStageScore
+    exit_to_dm: QAStageScore = Field(default_factory=QAStageScore)
+    opening: QAStageScore = Field(default_factory=QAStageScore)
+    development: QAStageScore = Field(default_factory=QAStageScore)
+    closing: QAStageScore = Field(default_factory=QAStageScore)
+    objection_handling: QAStageScore = Field(default_factory=QAStageScore)
 
 
 class QAResponse(BaseModel, frozen=True):
     """Structured QA analysis from LLM."""
 
+    call_type: str = ""
     product_detected: str = ""
     segment_detected: str = ""
     stage_scores: QAStageScores

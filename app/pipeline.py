@@ -27,6 +27,7 @@ async def process_call(
     bitrix: Bitrix24Client,
     qa_entity_type_id: int = 0,
     qa_field_map: dict[str, str] | None = None,
+    company_segment_field: str = "",
 ) -> PendingDealBinding | None:
     """Main pipeline: download -> S3 -> STT -> LLM -> CRM -> QA (best-effort).
 
@@ -91,15 +92,38 @@ async def process_call(
         )
         # Bitrix24 expects phone with '+' prefix
         phone = raw_phone if raw_phone.startswith("+") else f"+{raw_phone}"
-        comment = _format_comment(analysis, call_data)
         company_id: int | None = None
+        crm_manager_name: str | None = None
+        crm_segment: str | None = None
+        extra_fields = [company_segment_field] if company_segment_field else []
         try:
-            company = await bitrix.find_company_by_phone(phone)
+            company = await bitrix.find_company_by_phone(phone, extra_fields)
             if not company:
                 log.warning("company_not_found_saving_locally", phone=phone)
                 _save_failed_crm_result(log, call_data, analysis)
             else:
                 company_id = int(company["ID"])
+
+                # Fetch manager name and segment from CRM
+                assigned_id = company.get("ASSIGNED_BY_ID")
+                if assigned_id:
+                    crm_manager_name = await bitrix.get_user_name(int(assigned_id))
+                log.info(
+                    "manager_resolved",
+                    assigned_id=assigned_id,
+                    crm_manager_name=crm_manager_name,
+                )
+                if company_segment_field:
+                    seg_raw = company.get(company_segment_field)
+                    if seg_raw:
+                        crm_segment = await bitrix.resolve_enum_value(
+                            "company", company_segment_field, seg_raw,
+                        )
+
+                # Build comment with CRM manager name (preferred) or LLM-extracted
+                mgr_name = crm_manager_name or analysis.manager_name
+                comment = _format_comment(analysis, call_data, manager_name=mgr_name)
+
                 deal = await bitrix.find_open_deal(company_id)
 
                 if deal:
@@ -131,9 +155,16 @@ async def process_call(
         if call_data.direction == "outgoing" and qa_entity_type_id and qa_field_map:
             try:
                 start = time.monotonic()
+                mgr_for_qa = crm_manager_name or analysis.manager_name
+                log.info(
+                    "qa_manager",
+                    crm_name=crm_manager_name,
+                    llm_name=analysis.manager_name,
+                    final=mgr_for_qa,
+                )
                 qa_result = await llm.analyze_qa(
                     transcript=transcript,
-                    manager_name=analysis.manager_name,
+                    manager_name=mgr_for_qa,
                     duration=call_data.duration,
                 )
                 log.info("stage_complete", stage="qa_llm", duration_ms=_elapsed(start))
@@ -146,10 +177,22 @@ async def process_call(
                     entity_type_id=qa_entity_type_id,
                     field_map=qa_field_map,
                     deal_id=deal_id_for_qa,
+                    manager_name=mgr_for_qa,
+                    segment=crm_segment,
                     call_date=date_str,
                     audio_path=mp3_path,
                 )
                 log.info("stage_complete", stage="qa_crm", duration_ms=_elapsed(start))
+
+                # Save transcript to QA item timeline
+                try:
+                    await bitrix.add_timeline_comment(
+                        "", qa_item_id, f"📝 Транскрипция\n\n{transcript}",
+                        entity_type_id=qa_entity_type_id,
+                    )
+                    log.info("qa_transcript_saved", item_id=qa_item_id)
+                except Bitrix24APIError as exc:
+                    log.error("qa_transcript_failed", item_id=qa_item_id, error=repr(exc))
             except Exception as exc:
                 log.error("qa_failed", error=repr(exc))
 
@@ -210,7 +253,9 @@ _SENTIMENT_RU = {
 }
 
 
-def _format_comment(analysis: LLMResponse, call_data: CallData) -> str:
+def _format_comment(
+    analysis: LLMResponse, call_data: CallData, *, manager_name: str | None = None,
+) -> str:
     direction_label = (
         "Исходящий" if analysis.call_direction == "outgoing" else "Входящий"
     )
@@ -232,7 +277,7 @@ def _format_comment(analysis: LLMResponse, call_data: CallData) -> str:
         f"Квалификация: {qualification}",
         f"Настроение: {sentiment}",
         f"ЛПР: {decision_maker}",
-        f"Менеджер: {analysis.manager_name or '-'}",
+        f"Менеджер: {manager_name or analysis.manager_name or '-'}",
         "",
         "──── Клиент ────",
         f"Запрос: {analysis.client_request or '-'}",

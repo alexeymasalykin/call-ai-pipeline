@@ -39,7 +39,16 @@ services:
       - tmp_data:/data/tmp
       - failed_crm:/data/failed_crm
       - ./service_account_key.json:/app/service_account_key.json:ro
+    restart: unless-stopped
     stop_grace_period: 300s
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:3010:80"
+    restart: unless-stopped
 
 volumes:
   redis_data:

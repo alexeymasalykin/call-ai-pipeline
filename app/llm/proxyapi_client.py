@@ -111,6 +111,12 @@ class ProxyAPIClient:
     def _parse_qa_response(raw: str) -> QAResponse | None:
         try:
             data = json.loads(raw)
+            # LLM may return null for entire stage blocks — normalize to empty dict
+            stages = data.get("stage_scores")
+            if isinstance(stages, dict):
+                for key in ("exit_to_dm", "opening", "development", "closing", "objection_handling"):
+                    if stages.get(key) is None:
+                        stages[key] = {}
             return QAResponse.model_validate(data)
         except json.JSONDecodeError as exc:
             logger.warning("qa_json_decode_error", error=str(exc))
