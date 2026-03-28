@@ -2,134 +2,134 @@
 
 [![CI](https://github.com/alexeymasalykin/call-ai-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/alexeymasalykin/call-ai-pipeline/actions/workflows/ci.yml)
 
-Automated phone call processing pipeline that downloads recordings, transcribes them, analyzes with LLM, and pushes results to CRM.
+Автоматический пайплайн обработки телефонных звонков: скачивание записи → транскрибация → анализ LLM → отправка в CRM.
 
-## Architecture
+## Архитектура
 
 ```
 Novofon Webhook → FastAPI → Redis Queue → arq Worker → Pipeline
                                                          │
                                           ┌──────────────┼──────────────┐
                                           ▼              ▼              ▼
-                                     Download       Transcribe      Analyze
-                                    (Novofon)     (YandexSTT)    (LLM via API)
+                                     Скачивание    Транскрибация     Анализ
+                                     (Novofon)    (Yandex STT)    (LLM API)
                                           │              │              │
                                           ▼              ▼              ▼
-                                     Upload S3     Save transcript  CRM update
-                                                                   (Bitrix24)
-                                                                       │
-                                                                       ▼
-                                                                  QA scoring
-                                                               (smart process)
+                                    Загрузка S3   Сохранение текста  CRM-обновление
+                                                                    (Bitrix24)
+                                                                        │
+                                                                        ▼
+                                                                   QA-оценка
+                                                                (smart process)
 ```
 
-### Pipeline Stages
+### Этапы пайплайна
 
-1. **Webhook** — receives call completion event from Novofon PBX
-2. **Download** — fetches MP3 recording via Novofon Data API 2.0
-3. **Upload** — stores recording in Yandex Object Storage (S3)
-4. **Transcribe** — speech-to-text via Yandex SpeechKit (async recognition)
-5. **Analyze** — LLM extracts summary, qualification, product, and conversation quality scores
-6. **CRM** — creates/updates company, deal, and timeline comment in Bitrix24
-7. **QA** — creates quality assessment item in Bitrix24 smart process with per-stage scores
+1. **Webhook** — получение события завершения звонка от АТС Novofon
+2. **Скачивание** — загрузка MP3-записи через Novofon Data API 2.0
+3. **Загрузка в S3** — сохранение записи в Yandex Object Storage
+4. **Транскрибация** — распознавание речи через Yandex SpeechKit (асинхронное)
+5. **Анализ** — LLM извлекает резюме, квалификацию, продукт и оценки качества разговора
+6. **CRM** — создание/обновление компании, сделки и комментария в таймлайне Bitrix24
+7. **QA** — создание элемента оценки качества в смарт-процессе Bitrix24 с оценками по этапам
 
-### Key Features
+### Ключевые возможности
 
-- **Idempotent processing** — deduplication via Redis keys (7-day TTL)
-- **Retry with backoff** — transient errors retry via arq, permanent errors go to DLQ
-- **Deferred deal binding** — if no deal exists at processing time, retries CRM binding on a schedule
-- **Rate limiting** — built-in Bitrix24 API rate limiter with 429 handling
-- **Structured logging** — JSON logs via structlog
-- **Graceful shutdown** — all HTTP clients properly closed on SIGTERM
-- **Dashboard** — Vue 3 + Chart.js analytics dashboard with manager rankings and call stats
+- **Идемпотентная обработка** — дедупликация через Redis-ключи (TTL 7 дней)
+- **Retry с backoff** — транзиентные ошибки повторяются через arq, постоянные → DLQ
+- **Отложенная привязка сделки** — если сделки нет в момент обработки, повторная попытка по расписанию
+- **Rate limiting** — встроенный лимитер Bitrix24 API с обработкой HTTP 429
+- **Структурированные логи** — JSON через structlog
+- **Graceful shutdown** — все HTTP-клиенты корректно закрываются по SIGTERM
+- **Дашборд** — аналитическая панель на Vue 3 + Chart.js с рейтингом менеджеров и статистикой звонков
 
-## Dashboard
+## Дашборд
 
-Analytics dashboard built with Vue 3 + Chart.js.
+Аналитическая панель на Vue 3 + Chart.js.
 
-![Call statistics and processing funnel](screenshots/dashboard-stats.png)
+![Статистика обработки и воронка звонков](screenshots/dashboard-stats.png)
 
 <details>
-<summary>More screenshots</summary>
+<summary>Ещё скриншоты</summary>
 
-![QA scores heatmap and manager ranking](screenshots/dashboard-heatmap.png)
+![Тепловая карта оценок и сводка по менеджерам](screenshots/dashboard-heatmap.png)
 
-![QA radar chart and score distribution](screenshots/dashboard-qa.png)
+![Радар-чарт и распределение оценок](screenshots/dashboard-qa.png)
 
-![Call list with LLM analysis results](screenshots/dashboard-calls.png)
+![Список звонков с результатами LLM-анализа](screenshots/dashboard-calls.png)
 
 </details>
 
-## Tech Stack
+## Стек технологий
 
 - **API:** FastAPI + uvicorn
-- **Worker:** arq (async Redis-based task queue)
-- **STT:** Yandex SpeechKit (async batch recognition)
-- **LLM:** OpenAI-compatible API (via ProxyAPI)
+- **Воркер:** arq (асинхронная очередь задач на Redis)
+- **STT:** Yandex SpeechKit (асинхронное пакетное распознавание)
+- **LLM:** OpenAI-совместимый API (через ProxyAPI)
 - **CRM:** Bitrix24 REST API
-- **PBX:** Novofon Data API 2.0
-- **Storage:** Yandex Object Storage (S3-compatible)
-- **Queue/Cache:** Redis 7
-- **Dashboard:** Vue 3, Chart.js, Vite
-- **Infra:** Docker, Docker Compose, multi-stage builds
+- **АТС:** Novofon Data API 2.0
+- **Хранилище:** Yandex Object Storage (S3-совместимое)
+- **Очередь/кэш:** Redis 7
+- **Дашборд:** Vue 3, Chart.js, Vite
+- **Инфра:** Docker, Docker Compose, multi-stage builds
 
-## Quick Start
+## Быстрый старт
 
 ```bash
-# 1. Clone and configure
+# 1. Клонировать и настроить
 cp .env.example .env
-# Fill in all required values in .env
+# Заполнить все обязательные переменные в .env
 
-# 2. Place Yandex Cloud service account key
-# Download from IAM console → save as service_account_key.json
+# 2. Положить ключ сервисного аккаунта Yandex Cloud
+# Скачать из консоли IAM → сохранить как service_account_key.json
 
-# 3. Run
+# 3. Запустить
 docker-compose up -d
 
-# 4. Verify
+# 4. Проверить
 curl http://localhost:8010/health
 ```
 
-## Project Structure
+## Структура проекта
 
 ```
 app/
-├── main.py            # FastAPI app: webhook, health, admin, stats endpoints
-├── worker.py          # arq worker: task handlers, startup/shutdown lifecycle
-├── pipeline.py        # Main processing pipeline orchestrator
-├── config.py          # Pydantic settings (env-based configuration)
-├── stats.py           # Redis-based daily call statistics
-├── exceptions.py      # Custom exception hierarchy
+├── main.py            # FastAPI: webhook, health, admin, stats endpoints
+├── worker.py          # arq worker: обработчики задач, жизненный цикл
+├── pipeline.py        # Оркестратор основного пайплайна
+├── config.py          # Pydantic settings (конфигурация через env)
+├── stats.py           # Дневная статистика звонков в Redis
+├── exceptions.py      # Иерархия исключений
 ├── crm/
-│   └── bitrix24.py    # Bitrix24 REST API client
+│   └── bitrix24.py    # Клиент Bitrix24 REST API
 ├── llm/
-│   ├── base.py        # Abstract LLM client interface
-│   └── proxyapi_client.py  # OpenAI-compatible LLM client
+│   ├── base.py        # Абстрактный интерфейс LLM-клиента
+│   └── proxyapi_client.py  # OpenAI-совместимый LLM-клиент
 ├── models/
-│   ├── schemas.py     # Core data models (CallData, LLMResponse, etc.)
-│   └── qa_schemas.py  # QA scoring models
+│   ├── schemas.py     # Модели данных (CallData, LLMResponse и др.)
+│   └── qa_schemas.py  # Модели QA-оценки
 ├── novofon/
-│   ├── api.py         # Novofon Data API 2.0 client
-│   └── webhook.py     # Webhook payload parser
+│   ├── api.py         # Клиент Novofon Data API 2.0
+│   └── webhook.py     # Парсер webhook-payload
 └── stt/
-    ├── s3.py          # S3-compatible storage client
-    └── speechkit.py   # Yandex SpeechKit async recognition
+    ├── s3.py          # S3-совместимый клиент хранилища
+    └── speechkit.py   # Yandex SpeechKit асинхронное распознавание
 
-dashboard/             # Vue 3 analytics dashboard
-scripts/               # Utility scripts (backfill, testing)
-tests/                 # pytest test suite
+dashboard/             # Аналитический дашборд на Vue 3
+scripts/               # Утилиты (backfill статистики)
+tests/                 # Тесты (pytest)
 ```
 
 ## API Endpoints
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/health` | — | Health check (Redis ping) |
-| POST | `/webhook` | `?secret=` | Novofon webhook receiver |
-| GET | `/api/stats?days=30` | — | Call statistics (daily + totals) |
-| GET | `/admin/failed` | Bearer token | List DLQ entries |
-| POST | `/admin/retry/{call_id}` | Bearer token | Re-enqueue failed call |
+| Метод | Путь | Авторизация | Описание |
+|-------|------|-------------|----------|
+| GET | `/health` | — | Health check (пинг Redis) |
+| POST | `/webhook` | `?secret=` | Приём webhook от Novofon |
+| GET | `/api/stats?days=30` | — | Статистика звонков (по дням + итого) |
+| GET | `/admin/failed` | Bearer token | Список записей из DLQ |
+| POST | `/admin/retry/{call_id}` | Bearer token | Повторная обработка звонка из DLQ |
 
-## License
+## Лицензия
 
 MIT
