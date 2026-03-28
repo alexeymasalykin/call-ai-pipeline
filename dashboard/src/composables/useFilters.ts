@@ -31,7 +31,7 @@ export function useFilters(items: () => QaItem[]) {
   })
 
   const filtered = computed(() => {
-    return items().filter(item => {
+    return validItems.value.filter(item => {
       if (manager.value && item.manager !== manager.value) return false
       if (product.value && item.product !== product.value) return false
 
@@ -44,13 +44,19 @@ export function useFilters(items: () => QaItem[]) {
     })
   })
 
+  const DATA_START = new Date('2026-03-18T00:00:00')
+
+  const validItems = computed(() =>
+    items().filter(i => new Date(i.createdTime) >= DATA_START),
+  )
+
   const managers = computed(() => {
-    const set = new Set(items().map(i => i.manager).filter(Boolean))
+    const set = new Set(validItems.value.map(i => i.manager).filter(Boolean))
     return Array.from(set).sort()
   })
 
   const products = computed(() => {
-    const set = new Set(items().map(i => i.product).filter(Boolean))
+    const set = new Set(validItems.value.map(i => i.product).filter(Boolean))
     return Array.from(set).sort()
   })
 

@@ -40,7 +40,10 @@ def mock_deps():
     bitrix.find_company_by_phone.return_value = {"ID": "10", "TITLE": "ООО Ромашка"}
     bitrix.find_open_deal.return_value = {"ID": "55", "TITLE": "Сделка", "STAGE_ID": "NEW"}
 
+    redis = AsyncMock()
+
     return {
+        "redis": redis,
         "novofon": novofon,
         "s3": s3,
         "stt": stt,
@@ -62,7 +65,7 @@ class TestProcessCall:
         mock_deps["bitrix"].find_open_deal.assert_called_once_with(10)
         mock_deps["bitrix"].add_timeline_comment.assert_called_once()
         # Incoming call — search by caller_number
-        assert mock_deps["bitrix"].find_company_by_phone.call_args[0][0] == "79001234567"
+        assert mock_deps["bitrix"].find_company_by_phone.call_args[0][0] == "+79001234567"
         # Comment on deal
         assert mock_deps["bitrix"].add_timeline_comment.call_args[0][0] == "deal"
         assert mock_deps["bitrix"].add_timeline_comment.call_args[0][1] == 55
@@ -79,7 +82,7 @@ class TestProcessCall:
         )
         await process_call(outgoing_call, **mock_deps)
 
-        mock_deps["bitrix"].find_company_by_phone.assert_called_once_with("79001234567")
+        assert mock_deps["bitrix"].find_company_by_phone.call_args[0][0] == "+79001234567"
 
     @pytest.mark.asyncio
     async def test_no_deal_comments_on_company(self, sample_call_data, mock_deps):

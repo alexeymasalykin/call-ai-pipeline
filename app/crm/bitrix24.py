@@ -248,6 +248,14 @@ class Bitrix24Client:
         for attempt, delay in enumerate(_API_RETRY_SCHEDULE, start=1):
             try:
                 resp = await self._client.post(f"{self._url}{method}", json=data)
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", delay or 30))
+                    logger.warning(
+                        "bitrix_rate_limited", method=method,
+                        attempt=attempt, retry_after=retry_after,
+                    )
+                    await asyncio.sleep(retry_after)
+                    continue
                 resp.raise_for_status()
                 return resp.json()
             except httpx.HTTPStatusError as exc:

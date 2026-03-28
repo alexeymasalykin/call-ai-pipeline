@@ -65,7 +65,7 @@ class SpeechKitClient:
         logger.info("iam_token_refreshed")
         return self._iam_token
 
-    async def transcribe(self, s3_uri: str, call_id: str) -> list[TranscriptSegment]:
+    async def transcribe(self, s3_uri: str, call_id: str, audio_channels: int = 1) -> list[TranscriptSegment]:
         """Transcribe audio from S3 URI. Returns list of transcript segments.
 
         Raises:
@@ -74,7 +74,7 @@ class SpeechKitClient:
         """
         for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
             try:
-                segments = await self._run_recognition(s3_uri)
+                segments = await self._run_recognition(s3_uri, audio_channels)
                 if not segments:
                     raise EmptyTranscriptionError(f"Empty transcription for {call_id}")
                 logger.info(
@@ -94,7 +94,7 @@ class SpeechKitClient:
 
         raise TranscriptionError(f"STT failed for {call_id}")
 
-    async def _run_recognition(self, s3_uri: str) -> list[TranscriptSegment]:
+    async def _run_recognition(self, s3_uri: str, audio_channels: int = 1) -> list[TranscriptSegment]:
         """Submit async recognition and poll for result."""
         token = await self._ensure_iam_token()
         headers = {
@@ -111,7 +111,7 @@ class SpeechKitClient:
                     "audioEncoding": "MP3",
                     "profanityFilter": False,
                     "literature_text": True,
-                    "audioChannelCount": 2,
+                    "audioChannelCount": audio_channels,
                 },
                 "folderId": self._folder_id,
             },

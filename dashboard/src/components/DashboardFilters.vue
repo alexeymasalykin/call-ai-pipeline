@@ -39,7 +39,7 @@ function onDateToInput(e: Event) {
 </script>
 
 <template>
-  <div class="b24-card p-4 mb-5">
+  <div class="b24-card mb-5">
     <div class="flex flex-wrap items-end gap-3">
       <div class="flex flex-col gap-1">
         <label class="text-xs font-semibold text-b24-text-secondary uppercase tracking-wide">Менеджер</label>

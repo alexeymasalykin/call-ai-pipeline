@@ -11,6 +11,7 @@ from redis.exceptions import RedisError
 
 from app.config import Settings
 from app.novofon.webhook import WebhookIgnored, parse_webhook
+from app.stats import get_range
 
 logger = structlog.get_logger()
 
@@ -28,7 +29,17 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    from fastapi.middleware.cors import CORSMiddleware
+
     app = FastAPI(title="Call AI Pipeline", docs_url=None, redoc_url=None, lifespan=lifespan)
+    settings = Settings()
+    origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()] if settings.CORS_ORIGINS else []
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["GET"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     async def health():
@@ -79,6 +90,17 @@ def create_app() -> FastAPI:
 
         logger.info("call_enqueued", call_id=pbx_call_id)
         return {"status": "enqueued", "call_id": pbx_call_id}
+
+    @app.get("/api/stats")
+    async def get_stats(days: int = 30):
+        if days < 1 or days > 365:
+            raise HTTPException(400, detail="days must be between 1 and 365")
+        daily = await get_range(app.state.redis, days)
+        totals: dict[str, int] = {}
+        for day_stats in daily.values():
+            for field, value in day_stats.items():
+                totals[field] = totals.get(field, 0) + value
+        return {"days": days, "daily": daily, "totals": totals}
 
     def _verify_admin(authorization: str = Header()):
         settings: Settings = app.state.settings

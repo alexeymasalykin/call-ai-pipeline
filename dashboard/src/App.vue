@@ -3,6 +3,7 @@ import { onMounted, computed } from 'vue'
 import { useB24 } from '@/composables/useB24'
 import { useQaData } from '@/composables/useQaData'
 import { useFilters } from '@/composables/useFilters'
+import { useCallStats } from '@/composables/useCallStats'
 import { computeMetrics, computeStageAverages, computeManagerTable } from '@/utils/metrics'
 import DashboardFilters from '@/components/DashboardFilters.vue'
 import MetricCards from '@/components/MetricCards.vue'
@@ -10,10 +11,19 @@ import RadarChart from '@/components/RadarChart.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import CallList from '@/components/CallList.vue'
 import ManagerTable from '@/components/ManagerTable.vue'
+import ManagerRanking from '@/components/ManagerRanking.vue'
+import StageHeatmap from '@/components/StageHeatmap.vue'
+import ScoreDistribution from '@/components/ScoreDistribution.vue'
+import ManagerTrend from '@/components/ManagerTrend.vue'
+import CallFunnel from '@/components/CallFunnel.vue'
+import CallVolumeChart from '@/components/CallVolumeChart.vue'
+import QualificationPie from '@/components/QualificationPie.vue'
+import ManagerReport from '@/components/ManagerReport.vue'
 import EmptyState from '@/components/EmptyState.vue'
 
 const { init, error: b24Error } = useB24()
 const { items, loading, error: dataError, fetchAll } = useQaData()
+const { stats, fetchStats } = useCallStats()
 const {
   manager, product, periodPreset, dateFrom, dateTo,
   filtered, managers, products, isMultiDay,
@@ -27,33 +37,29 @@ const error = computed(() => b24Error.value || dataError.value)
 onMounted(async () => {
   try {
     await init()
-    await fetchAll()
+    await Promise.all([fetchAll(), fetchStats(30)])
   } catch {
     // errors captured in refs
   }
 })
 
 async function refresh() {
-  await fetchAll()
+  await Promise.all([fetchAll(), fetchStats(30)])
 }
 </script>
 
 <template>
-  <div class="min-h-screen p-5 max-w-[1400px] mx-auto">
-    <div class="flex items-center justify-between mb-5">
-      <h1 class="text-xl font-semibold text-b24-text">Оценка качества звонков</h1>
-    </div>
-
-    <div v-if="error" class="b24-card p-4 mb-5 border-l-4 border-b24-red">
-      <p class="text-b24-red text-sm">{{ error }}</p>
-    </div>
-
-    <div v-if="loading" class="flex items-center justify-center py-32">
-      <div class="text-center">
-        <div class="w-8 h-8 border-3 border-b24-blue border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-        <p class="text-b24-text-secondary text-sm">Загрузка данных...</p>
+  <B24App>
+    <div class="min-h-screen p-5 max-w-[1400px] mx-auto">
+      <div class="flex items-center justify-between mb-5">
+        <h1 class="text-xl font-semibold text-b24-text">Оценка качества звонков</h1>
       </div>
-    </div>
+
+      <B24Alert v-if="error" color="red" variant="subtle" :description="error" class="mb-5" />
+
+      <div v-if="loading" class="flex items-center justify-center py-32">
+        <B24Skeleton class="w-full h-48 rounded-xl" />
+      </div>
 
     <template v-else-if="!error">
       <DashboardFilters
@@ -67,12 +73,35 @@ async function refresh() {
         @refresh="refresh"
       />
 
+      <!-- Call Processing Stats -->
+      <div v-if="stats && (stats.totals.total ?? 0) > 0" class="mb-5">
+        <h2 class="text-lg font-semibold text-b24-text mb-3">Статистика обработки</h2>
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <CallFunnel :stats="stats" />
+          <CallVolumeChart :stats="stats" />
+          <QualificationPie :stats="stats" />
+        </div>
+      </div>
+
       <template v-if="filtered.length > 0">
-        <MetricCards :metrics="metrics" />
+        <!-- Manager detail report -->
+        <ManagerReport v-if="manager" :items="filtered" :manager="manager" />
+
+        <MetricCards :metrics="metrics" :total-outgoing="stats?.totals?.outgoing" />
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+          <ManagerRanking :rows="managerRows" />
+          <ScoreDistribution :items="filtered" />
+          <RadarChart :averages="stageAverages" />
+        </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
-          <RadarChart :averages="stageAverages" />
+          <ManagerTrend :items="filtered" />
           <TrendChart :items="filtered" />
+        </div>
+
+        <div class="mb-5">
+          <StageHeatmap :items="filtered" />
         </div>
 
         <div v-if="isMultiDay" class="mb-5">
@@ -84,5 +113,6 @@ async function refresh() {
 
       <EmptyState v-else />
     </template>
-  </div>
+    </div>
+  </B24App>
 </template>

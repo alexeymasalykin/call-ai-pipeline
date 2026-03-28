@@ -47,54 +47,31 @@ class TestWebhookEndpoint:
     def test_valid_webhook(self, client):
         payload = {
             "event": "NOTIFY_RECORD",
-            "call_id": "123",
-            "caller_id": "79001234567",
-            "called_did": "74951234567",
-            "duration": "45",
-            "call_start": "2026-03-12 10:00:00",
+            "pbx_call_id": "123",
         }
-        resp = client.post(
-            "/webhook", json=payload,
-            headers={"X-Webhook-Secret": "test-secret"},
-        )
+        resp = client.post("/webhook?secret=test-secret", json=payload)
         assert resp.status_code == 200
         assert resp.json()["status"] == "enqueued"
 
     def test_invalid_secret_returns_403(self, client):
-        resp = client.post(
-            "/webhook", json={},
-            headers={"X-Webhook-Secret": "wrong-secret"},
-        )
+        resp = client.post("/webhook?secret=wrong-secret", json={})
         assert resp.status_code == 403
 
-    def test_missing_secret_returns_422(self, client):
+    def test_missing_secret_returns_403(self, client):
         resp = client.post("/webhook", json={})
-        assert resp.status_code == 422
+        assert resp.status_code == 403
 
-    def test_short_call_ignored(self, client):
-        payload = {
-            "event": "NOTIFY_RECORD",
-            "call_id": "123",
-            "caller_id": "79001234567",
-            "called_did": "74951234567",
-            "duration": "5",
-            "call_start": "2026-03-12 10:00:00",
-        }
-        resp = client.post(
-            "/webhook", json=payload,
-            headers={"X-Webhook-Secret": "test-secret"},
-        )
+    def test_non_record_event_ignored(self, client):
+        payload = {"event": "NOTIFY_START", "pbx_call_id": "123"}
+        resp = client.post("/webhook?secret=test-secret", json=payload)
         assert resp.status_code == 200
         assert resp.json()["status"] == "ignored"
 
     def test_invalid_json_returns_400(self, client):
         resp = client.post(
-            "/webhook",
+            "/webhook?secret=test-secret",
             content=b"not json",
-            headers={
-                "X-Webhook-Secret": "test-secret",
-                "Content-Type": "application/json",
-            },
+            headers={"Content-Type": "application/json"},
         )
         assert resp.status_code == 400
 
@@ -156,7 +133,7 @@ class TestAdminRetryEndpoint:
         assert resp.json()["status"] == "re-enqueued"
         mock_redis.lrem.assert_called_once()
 
-    def test_retry_removes_entry_without_call_data(self, client):
+    def test_retry_entry_without_call_data(self, client):
         entry = json.dumps({"call_id": "retry-2", "error": "bad data"})
         mock_redis = client.app.state.redis
         mock_redis.lrange.return_value = [entry.encode()]
@@ -165,7 +142,7 @@ class TestAdminRetryEndpoint:
             headers={"Authorization": "Bearer test-admin"},
         )
         assert resp.status_code == 200
-        assert resp.json()["status"] == "removed_from_dlq"
+        assert resp.json()["status"] == "re-enqueued"
 
     def test_retry_not_found_returns_404(self, client):
         mock_redis = client.app.state.redis

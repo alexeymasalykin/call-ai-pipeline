@@ -21,6 +21,13 @@
   --color-b24-violet: #9985f3;
 }
 
+.b24-card {
+  background: var(--color-b24-surface);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  padding: 1.25rem;
+}
+
 body {
   background: var(--color-b24-bg);
   color: var(--color-b24-text);
@@ -29,10 +36,3 @@ body {
   margin: 0;
 }
 
-.b24-card {
-  background: var(--color-b24-surface);
-  border-radius: 12px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-}
-
-/* Force cache bust v2 */

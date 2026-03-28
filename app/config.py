@@ -1,6 +1,7 @@
+import json
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -23,8 +24,23 @@ class Settings(BaseSettings):
 
     BITRIX24_WEBHOOK_URL: str
     BITRIX24_QA_ENTITY_TYPE_ID: int = 1040
-    BITRIX24_QA_FIELD_MAP: str = '{}'
+    BITRIX24_QA_FIELD_MAP: dict[str, str] = Field(default_factory=dict)
     BITRIX24_COMPANY_SEGMENT_FIELD: str = ""
+
+    @field_validator("BITRIX24_QA_FIELD_MAP", mode="before")
+    @classmethod
+    def parse_qa_field_map(cls, v: str | dict) -> dict[str, str]:
+        if isinstance(v, dict):
+            return v
+        if not v or v.strip() == "{}":
+            return {}
+        try:
+            parsed = json.loads(v)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"BITRIX24_QA_FIELD_MAP must be valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("BITRIX24_QA_FIELD_MAP must be a JSON object")
+        return parsed
 
     REDIS_URL: str = "redis://redis:6379/0"
 
@@ -36,5 +52,6 @@ class Settings(BaseSettings):
     ALERT_WEBHOOK_URL: str = ""
     ADMIN_TOKEN: str
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    CORS_ORIGINS: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}

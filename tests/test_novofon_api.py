@@ -33,11 +33,11 @@ class TestNovofonAPI:
             "jsonrpc": "2.0", "id": 1,
             "result": {"data": [{
                 "id": 123,
-                "call_records": ["https://novofon.com/dl/123.mp3"],
+                "call_records": ["abc123hash"],
                 "wav_call_records": [],
             }], "metadata": {}},
         })
-        respx.get("https://novofon.com/dl/123.mp3").respond(200, content=b"mp3-data")
+        respx.get("https://app.novofon.ru/system/media/talk/123/abc123hash/").respond(200, content=b"mp3-data")
         path = await api.download_recording("123", recording_url=None)
         assert path.exists()
 

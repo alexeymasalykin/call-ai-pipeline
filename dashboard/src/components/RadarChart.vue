@@ -61,7 +61,7 @@ const chartOptions = {
 </script>
 
 <template>
-  <div class="b24-card p-4">
+  <div class="b24-card">
     <h3 class="text-sm font-semibold text-b24-text-secondary mb-3">Средние оценки по этапам</h3>
     <div class="h-[300px]">
       <Radar :data="chartData" :options="chartOptions" />

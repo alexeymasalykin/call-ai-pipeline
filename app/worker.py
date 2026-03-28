@@ -1,11 +1,13 @@
 import json
 from datetime import datetime, timedelta, timezone
+from typing import TypedDict
 
 import httpx
 import structlog
 from arq.connections import ArqRedis, RedisSettings, create_pool
 from redis.asyncio import Redis
 
+from app import stats
 from app.config import Settings
 from app.crm.bitrix24 import Bitrix24Client
 from app.exceptions import Bitrix24APIError, PipelineError, RetryableError
@@ -15,6 +17,19 @@ from app.novofon.api import NovofonAPI
 from app.pipeline import process_call
 from app.stt.s3 import S3Client
 from app.stt.speechkit import SpeechKitClient
+
+
+class WorkerContext(TypedDict, total=False):
+    settings: Settings
+    redis: Redis
+    novofon: NovofonAPI
+    s3: S3Client
+    stt: SpeechKitClient
+    llm: ProxyAPIClient
+    bitrix: Bitrix24Client
+    qa_field_map: dict[str, str]
+    arq: ArqRedis
+    job_try: int
 
 logger = structlog.get_logger()
 
@@ -90,7 +105,7 @@ def _build_call_data(call_info: dict) -> CallData:
     )
 
 
-async def handle_call(ctx: dict, pbx_call_id: str) -> None:
+async def handle_call(ctx: WorkerContext, pbx_call_id: str) -> None:
     """arq task handler: fetches call data from Novofon API, runs pipeline.
 
     RetryableError → re-raised for arq retry unless max_tries exhausted (then DLQ).
@@ -125,9 +140,16 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
 
     log = log.bind(direction=call_data.direction, duration=call_data.duration)
 
+    # Record basic stats for every call
+    call_date = call_data.timestamp.date()
+    await stats.increment(redis, call_date, "total")
+    await stats.increment(redis, call_date, call_data.direction)
+    await stats.increment(redis, call_date, "duration_sum", call_data.duration)
+
     # Skip short calls
     if call_data.duration < settings.MIN_CALL_DURATION:
         log.info("call_too_short", min_duration=settings.MIN_CALL_DURATION)
+        await stats.increment(redis, call_date, "short")
         return
 
     job_try = ctx.get("job_try", 1)
@@ -136,6 +158,7 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
     try:
         pending = await process_call(
             call_data,
+            redis=redis,
             novofon=novofon,
             s3=ctx["s3"],
             stt=ctx["stt"],
@@ -146,6 +169,7 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
             company_segment_field=settings.BITRIX24_COMPANY_SEGMENT_FIELD,
         )
         await _mark_processed(redis, call_data.call_id)
+        await stats.increment(redis, call_date, "analyzed")
         log.info("call_processed")
 
         # Schedule deferred deal binding if needed
@@ -153,6 +177,7 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
             await _enqueue_crm_retry(ctx, pending, settings)
     except RetryableError as exc:
         if job_try >= max_tries:
+            await stats.increment(redis, call_date, "errors")
             await _add_to_dlq(
                 redis, call_data.call_id, str(exc),
                 settings.ALERT_WEBHOOK_URL, call_info,
@@ -161,12 +186,14 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
             raise
     except PipelineError as exc:
         log.error("terminal_pipeline_error", error=repr(exc))
+        await stats.increment(redis, call_date, "errors")
         await _add_to_dlq(
             redis, call_data.call_id, repr(exc),
             settings.ALERT_WEBHOOK_URL, call_info,
         )
     except Exception as exc:
         log.error("unexpected_error", error=repr(exc), exc_info=True)
+        await stats.increment(redis, call_date, "errors")
         await _add_to_dlq(
             redis, call_data.call_id, repr(exc),
             settings.ALERT_WEBHOOK_URL, call_info,
@@ -175,7 +202,7 @@ async def handle_call(ctx: dict, pbx_call_id: str) -> None:
 
 
 async def _enqueue_crm_retry(
-    ctx: dict, pending: PendingDealBinding, settings: Settings,
+    ctx: WorkerContext, pending: PendingDealBinding, settings: Settings,
 ) -> None:
     """Enqueue a deferred CRM deal binding task."""
     pool: ArqRedis = ctx["arq"]
@@ -199,7 +226,7 @@ async def _enqueue_crm_retry(
 
 
 async def retry_crm_binding(
-    ctx: dict,
+    ctx: WorkerContext,
     company_id: int,
     comment: str,
     qa_item_id: int | None,
@@ -263,7 +290,7 @@ async def retry_crm_binding(
             log.error("crm_retry_qa_link_failed", error=repr(exc))
 
 
-async def startup(ctx: dict) -> None:
+async def startup(ctx: WorkerContext) -> None:
     """Initialize shared resources for arq worker."""
     settings = Settings()
     ctx["settings"] = settings
@@ -289,12 +316,22 @@ async def startup(ctx: dict) -> None:
         model=settings.LLM_MODEL,
     )
     ctx["bitrix"] = Bitrix24Client(webhook_url=settings.BITRIX24_WEBHOOK_URL)
-    ctx["qa_field_map"] = json.loads(settings.BITRIX24_QA_FIELD_MAP) if settings.BITRIX24_QA_FIELD_MAP else {}
+    ctx["qa_field_map"] = settings.BITRIX24_QA_FIELD_MAP
     ctx["arq"] = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
     logger.info("worker_started")
 
+    # Auto-recover stats if Redis lost data
+    try:
+        from scripts.backfill_stats import backfill_if_empty
+        import redis as sync_redis
+        sync_r = sync_redis.Redis.from_url(settings.REDIS_URL)
+        await backfill_if_empty(sync_r, settings)
+        sync_r.close()
+    except Exception as exc:
+        logger.warning("stats_backfill_failed", error=repr(exc))
 
-async def shutdown(ctx: dict) -> None:
+
+async def shutdown(ctx: WorkerContext) -> None:
     """Cleanup shared resources: close all clients, then Redis."""
     for name in ("bitrix", "llm", "novofon", "s3", "stt"):
         client = ctx.get(name)

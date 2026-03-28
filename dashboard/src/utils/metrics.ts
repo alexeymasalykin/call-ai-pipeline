@@ -3,19 +3,21 @@ import { STAGE_LABELS } from './fields'
 
 export function computeMetrics(items: QaItem[]): Metrics {
   if (items.length === 0) {
-    return { totalCalls: 0, avgScore: 0, criticalErrorsCount: 0, bestScore: 0 }
+    return { totalCalls: 0, avgScore: 0, criticalErrorsCount: 0, bestScore: 0, goodRate: 0 }
   }
 
   const scores = items.map(i => i.scoreTotal)
   const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length
   const criticalErrorsCount = items.filter(i => i.criticalErrors.trim().length > 0).length
   const bestScore = Math.max(...scores)
+  const goodRate = Math.round(scores.filter(s => s >= 7).length / scores.length * 100)
 
   return {
     totalCalls: items.length,
     avgScore: Math.round(avgScore * 10) / 10,
     criticalErrorsCount,
     bestScore,
+    goodRate,
   }
 }
 
@@ -64,10 +66,12 @@ export function computeManagerTable(items: QaItem[]): ManagerRow[] {
       ['', Infinity] as [string, number],
     )[0]
 
+    const goodCount = managerItems.filter(i => i.scoreTotal >= 7).length
     rows.push({
       manager,
       callCount: managerItems.length,
       avgScore,
+      goodRate: Math.round(goodCount / managerItems.length * 100),
       worstStage: STAGE_LABELS[worstStageKey] ?? worstStageKey,
       criticalErrorsCount: managerItems.filter(i => i.criticalErrors.trim().length > 0).length,
     })

@@ -70,8 +70,12 @@ class NovofonAPI:
 
         if "error" in data:
             err = data["error"]
-            # Token expired — re-login once
-            if err.get("data", {}).get("mnemonic") == "auth_error":
+            # Token expired or invalid — re-login once
+            is_auth_err = (
+                err.get("data", {}).get("mnemonic") == "auth_error"
+                or "token" in err.get("message", "").lower()
+            )
+            if is_auth_err and self._access_token is not None:
                 self._access_token = None
                 return await self._rpc_call(method, params)
             raise DownloadError(f"Novofon API error: {err['message']}")

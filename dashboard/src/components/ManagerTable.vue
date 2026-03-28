@@ -15,6 +15,7 @@ defineProps<{ rows: ManagerRow[] }>()
             <th class="text-left px-5 py-3 text-xs font-semibold text-b24-text-secondary uppercase tracking-wide">Менеджер</th>
             <th class="text-center px-5 py-3 text-xs font-semibold text-b24-text-secondary uppercase tracking-wide">Звонков</th>
             <th class="text-center px-5 py-3 text-xs font-semibold text-b24-text-secondary uppercase tracking-wide">Ср. оценка</th>
+            <th class="text-center px-5 py-3 text-xs font-semibold text-b24-text-secondary uppercase tracking-wide">≥ 7 баллов</th>
             <th class="text-center px-5 py-3 text-xs font-semibold text-b24-text-secondary uppercase tracking-wide">Худший этап</th>
             <th class="text-center px-5 py-3 text-xs font-semibold text-b24-text-secondary uppercase tracking-wide">Крит. ошибок</th>
           </tr>
@@ -33,6 +34,11 @@ defineProps<{ rows: ManagerRow[] }>()
                 :class="getScoreColor(row.avgScore)"
               >
                 {{ row.avgScore.toFixed(1) }}
+              </span>
+            </td>
+            <td class="px-5 py-3 text-center">
+              <span class="text-xs font-bold" :class="row.goodRate >= 50 ? 'text-b24-green' : 'text-b24-red'">
+                {{ row.goodRate }}%
               </span>
             </td>
             <td class="px-5 py-3 text-center text-b24-text-secondary">{{ row.worstStage }}</td>

@@ -4,7 +4,9 @@ __pycache__
 *.pyc
 .env
 tests/
-scripts/
+scripts/test_*
+scripts/check_*
+scripts/__pycache__
 docs/
 *.md
 .claude/

@@ -1,9 +1,12 @@
 import json
+import subprocess
 import time
 from pathlib import Path
 
 import structlog
+from redis.asyncio import Redis
 
+from app import stats
 from app.crm.bitrix24 import Bitrix24Client
 from app.exceptions import Bitrix24APIError, EmptyTranscriptionError
 from app.llm.base import LLMClient
@@ -20,6 +23,7 @@ _SKIP_QUALIFICATIONS = {Qualification.REJECTED, Qualification.SPAM}
 async def process_call(
     call_data: CallData,
     *,
+    redis: Redis,
     novofon: NovofonAPI,
     s3: S3Client,
     stt: SpeechKitClient,
@@ -48,6 +52,9 @@ async def process_call(
         )
         log.info("stage_complete", stage="download", duration_ms=_elapsed(start))
 
+        # 1b. Mix stereo to mono (both voices audible)
+        mp3_path = _mix_to_mono(mp3_path)
+
         # 2. Upload to S3
         start = time.monotonic()
         s3_uri = await s3.upload(mp3_path, s3_key)
@@ -59,6 +66,7 @@ async def process_call(
             segments = await stt.transcribe(s3_uri, call_data.call_id)
         except EmptyTranscriptionError:
             log.info("empty_transcription", stage="stt", duration_ms=_elapsed(start))
+            await stats.increment(redis, call_data.timestamp.date(), "no_transcript")
             return
         finally:
             await s3.delete(s3_key)
@@ -75,6 +83,7 @@ async def process_call(
             direction=call_data.direction,
         )
         log.info("stage_complete", stage="llm", duration_ms=_elapsed(start))
+        await stats.increment(redis, call_data.timestamp.date(), f"qual:{analysis.qualification}")
 
         # 5. Skip non-actionable calls
         if analysis.qualification in _SKIP_QUALIFICATIONS:
@@ -183,6 +192,7 @@ async def process_call(
                     audio_path=mp3_path,
                 )
                 log.info("stage_complete", stage="qa_crm", duration_ms=_elapsed(start))
+                await stats.increment(redis, call_data.timestamp.date(), "qa_assessed")
 
                 # Save transcript to QA item timeline
                 try:
@@ -291,6 +301,24 @@ def _format_comment(
         f"Теги: {tags}",
     ]
     return "\n".join(lines)
+
+
+def _mix_to_mono(mp3_path: Path) -> Path:
+    """Mix stereo MP3 to mono so both channels are audible in Bitrix24 player."""
+    mono_path = mp3_path.with_suffix(".mono.mp3")
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(mp3_path), "-ac", "1", "-q:a", "5", str(mono_path)],
+        capture_output=True, timeout=30,
+    )
+    if result.returncode == 0 and mono_path.exists():
+        mp3_path.unlink()
+        mono_path.rename(mp3_path)
+        logger.info("audio_mixed_to_mono", path=str(mp3_path))
+    else:
+        logger.warning("mono_mix_failed", stderr=result.stderr.decode()[:200])
+        if mono_path.exists():
+            mono_path.unlink()
+    return mp3_path
 
 
 def _elapsed(start: float) -> int:
