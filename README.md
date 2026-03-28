@@ -1,5 +1,7 @@
 # Call AI Pipeline
 
+[![CI](https://github.com/alexeymasalykin/call-ai-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/alexeymasalykin/call-ai-pipeline/actions/workflows/ci.yml)
+
 Automated phone call processing pipeline that downloads recordings, transcribes them, analyzes with LLM, and pushes results to CRM.
 
 ## Architecture
